@@ -112,6 +112,40 @@ export function sideBySide(diff: string): SideRow[] {
   return rows
 }
 
+/**
+ * Word-level changes between a line and what replaced it: each side as parts, `changed` where the words differ
+ * (an LCS over words, spaces and punctuation). Long lines (over 300 tokens a side) come back whole, as changed.
+ */
+export type WordPart = { text: string; changed: boolean }
+export function wordDiff(before: string, after: string): { left: WordPart[]; right: WordPart[] } {
+  const tok = (s: string) => s.match(/\s+|[A-Za-z0-9_]+|[^\sA-Za-z0-9_]/g) ?? []
+  const a = tok(before)
+  const b = tok(after)
+  if (a.length > 300 || b.length > 300) return { left: [{ text: before, changed: true }], right: [{ text: after, changed: true }] }
+  // lcs[i][j]: the common run of a[i..] and b[j..]
+  const lcs = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0))
+  for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) lcs[i]![j] = a[i] === b[j] ? lcs[i + 1]![j + 1]! + 1 : Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!)
+  const left: WordPart[] = []
+  const right: WordPart[] = []
+  const push = (side: WordPart[], text: string, changed: boolean) => {
+    const last = side[side.length - 1]
+    if (last && last.changed === changed) last.text += text
+    else side.push({ text, changed })
+  }
+  let i = 0
+  let j = 0
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) {
+      push(left, a[i]!, false)
+      push(right, b[j]!, false)
+      i++
+      j++
+    } else if (j < b.length && (i >= a.length || lcs[i]![j + 1]! >= lcs[i + 1]![j]!)) push(right, b[j++]!, true)
+    else push(left, a[i++]!, true)
+  }
+  return { left, right }
+}
+
 /** Sections that say what's next: a heading about next steps, open issues or to-dos. */
 export const NEXT_HEADING = /\b(next|open issues|to ?do|todo|roadmap|backlog|plans?)\b/i
 

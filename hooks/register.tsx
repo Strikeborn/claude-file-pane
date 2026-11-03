@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BinView, Change, CheckResult, OpenFile, Tick } from '../types'
-import { NEXT_HEADING, blocksFrom, boxesIn, commitsFrom, featuresFrom, flipTask, headingPath, releasesFrom, sections, sideBySide, splitBoxes, tasks } from './project'
+import type { BinView, Change, CheckResult, DiffBase, OpenFile, Tick } from '../types'
+import { NEXT_HEADING, blocksFrom, boxesIn, commitsFrom, featuresFrom, flipTask, headingPath, releasesFrom, sections, sideBySide, splitBoxes, tasks, wordDiff } from './project'
 import type { Block, Task, TimelineEntry } from './project'
 import type { EngineInterface } from 'claude-code'
 
@@ -41,6 +41,8 @@ const backupLogAtom = atom({ plugin: 'file-pane', key: 'backupLog' } as const, [
 const searchAtom = atom({ plugin: 'file-pane', key: 'search' } as const, '')
 const logErrorsAtom = atom({ plugin: 'file-pane', key: 'logErrorsOnly' } as const, false)
 const sideAtom = atom({ plugin: 'file-pane', key: 'sideBySide' } as const, false)
+const ignoreSpaceAtom = atom({ plugin: 'file-pane', key: 'ignoreSpace' } as const, false)
+const diffBaseAtom = atom({ plugin: 'file-pane', key: 'diffBase' } as const, { path: '', base: 'commit' } as DiffBase)
 const wrapAtom = atom({ plugin: 'file-pane', key: 'wrap' } as const, true)
 const binViewAtom = atom({ plugin: 'file-pane', key: 'binView' } as const, { path: '', mode: 'info', at: 0 } as BinView)
 const lastTickAtom = atom({ plugin: 'file-pane', key: 'lastTick' } as const, null as Tick | null)
@@ -711,13 +713,40 @@ async function within<T>($: EngineInterface, p: Promise<T>, ms: number, fallback
 }
 
 // Changes: every file Claude edits this session, newest first (the call's own path; only when it went through)
-async function recordChange($: EngineInterface, path: unknown, tool: string, ok: boolean): Promise<void> {
+async function recordChange($: EngineInterface, path: unknown, tool: string, ok: boolean, before?: string): Promise<void> {
   if (!ok || typeof path !== 'string' || !path) return
   await update($, changesAtom, list => {
     const old = list.find(c => c.path.toLowerCase() === path.toLowerCase())
     const rest = list.filter(c => c !== old)
-    return [{ path, tool, at: Date.now(), n: (old?.n ?? 0) + 1 }, ...rest].slice(0, 300)
+    const kept = old?.before ?? before
+    return [{ path, tool, at: Date.now(), n: (old?.n ?? 0) + 1, ...(kept !== undefined ? { before: kept } : {}) }, ...rest].slice(0, 300)
   })
+}
+
+/**
+ * Before Claude's first Edit / Write of a file this session: a backup copy of it (the pane's backups folder, listed in
+ * Backups), so ± Diff can show Claude's change and Put back can undo it. '' for a file that doesn't exist yet;
+ * undefined when no copy was made (already made, a folder, over 32 MB, no Node). Never stops the edit.
+ */
+async function snapshotBefore($: EngineInterface, path: unknown): Promise<string | undefined> {
+  if (typeof path !== 'string' || !path) return undefined
+  const known = (await read($, changesAtom)).find(c => c.path.toLowerCase() === path.toLowerCase())
+  if (known && known.before !== undefined) return known.before
+  const st = await $.fs.stat(path).catch(() => null)
+  if (!st) return ''
+  if (st.kind !== 'file' || st.size > 32 * 1024 * 1024) return undefined
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+  if (!home) return undefined
+  try {
+    const r = await $.process.run(['node', '-e', HELPER, 'backup', path, join(join(home, '.claude'), 'file-pane-backups')], { timeoutMs: 15_000 })
+    const j = JSON.parse(r.stdout || '{}') as { backup?: unknown }
+    if (typeof j.backup !== 'string') return undefined
+    const backup = j.backup
+    await update($, backupLogAtom, list => [{ backup, original: path, at: Date.now() }, ...list].slice(0, 500))
+    return backup
+  } catch {
+    return undefined
+  }
 }
 
 /** The tick log ($.store `ticks`, newest first, shared by every chat), or [] when unreadable. */
@@ -798,13 +827,15 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
+    const before = await snapshotBefore($, e.file_path)
     const r = await next(e)
-    await recordChange($, e.file_path, 'Edit', r.deny === undefined && r.isError !== true)
+    await recordChange($, e.file_path, 'Edit', r.deny === undefined && r.isError !== true, before)
     return r
   })
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
+    const before = await snapshotBefore($, e.file_path)
     const r = await next(e)
-    await recordChange($, e.file_path, 'Write', r.deny === undefined && r.isError !== true)
+    await recordChange($, e.file_path, 'Write', r.deny === undefined && r.isError !== true, before)
     return r
   })
   on('tool.call', { tool: 'NotebookEdit' }, async ($, e, next) => {
@@ -913,6 +944,27 @@ export const register: Register = on => {
     const diffView = (k: string, text: string) => {
       if (!side) return Code ? <Code key={`dv:${k}`} source={text} format="diff" wrap={wrapMode} /> : <Text key={`dv:${k}`} wrap={wrapMode}>{text}</Text>
       const rows = sideBySide(text).slice(0, 1500)
+      // a row's side: its sign, then the line, with the words that differ from the other side highlighted
+      const cellText = (r: (typeof rows)[number], which: 'left' | 'right') => {
+        const v = which === 'left' ? r.left : r.right
+        if (v === undefined) return ' '
+        const changed = r.kind === 'change'
+        const sign = changed ? (which === 'left' ? '- ' : '+ ') : '  '
+        if (!changed || r.left === undefined || r.right === undefined || !v) return `${sign}${v || ' '}`
+        const parts = wordDiff(r.left, r.right)[which]
+        return [
+          sign,
+          ...parts.map((p, i) =>
+            p.changed ? (
+              <Text key={`w${i}`} backgroundColor={which === 'left' ? 'diffRemovedWord' : 'diffAddedWord'}>
+                {p.text}
+              </Text>
+            ) : (
+              p.text
+            ),
+          ),
+        ]
+      }
       // wrapped, the two sides wrap to different heights: draw row by row so each before stays beside its after
       if (wrap)
         return (
@@ -930,7 +982,7 @@ export const register: Register = on => {
                 return (
                   <Box key={which} flexGrow={1} flexShrink={1} width="50%">
                     <Text wrap={wrapMode} color={changed ? (which === 'left' ? 'diffRemoved' : 'diffAdded') : undefined}>
-                      {v === undefined ? ' ' : `${changed ? (which === 'left' ? '- ' : '+ ') : '  '}${v || ' '}`}
+                      {cellText(r, which)}
                     </Text>
                   </Box>
                 )
@@ -957,7 +1009,7 @@ export const register: Register = on => {
             const changed = r.kind === 'change' && v !== undefined
             return (
               <Text key={`${which}${i}`} wrap="truncate-end" color={changed ? (which === 'left' ? 'diffRemoved' : 'diffAdded') : undefined}>
-                {v === undefined ? ' ' : `${changed ? (which === 'left' ? '- ' : '+ ') : '  '}${v || ' '}`}
+                {cellText(r, which)}
               </Text>
             )
           })}
@@ -970,10 +1022,16 @@ export const register: Register = on => {
         </Box>
       )
     }
+    // ⇆ Side by side (with the words that changed highlighted) and ␣ Ignore spaces, beside every diff
+    const ignoreSpace = await read($, ignoreSpaceAtom)
+    const wsArgs = ignoreSpace ? ['--ignore-all-space', '--ignore-blank-lines'] : []
     const sideToggle = (
-      <Button key="side" variant={side ? 'primary' : 'secondary'} onPress={() => void update($, sideAtom, v => !v)}>
-        ⇆ Side by side
-      </Button>
+      <Box key="diff-toggles" flexDirection="row" gap={1} flexWrap="wrap">
+        <Button key="side" variant={side ? 'primary' : 'secondary'} onPress={() => void update($, sideAtom, v => !v)}>
+          ⇆ Side by side
+        </Button>
+        <Button key="ws" label="␣ Ignore spaces" variant={ignoreSpace ? 'primary' : 'secondary'} onPress={() => void update($, ignoreSpaceAtom, v => !v)} />
+      </Box>
     )
     // notes are a convenience: a store that can't be read leaves them out, never the pane
     step('reading notes')
@@ -1558,7 +1616,7 @@ export const register: Register = on => {
     const flipDiff = (k: string) => update($, diffOpenAtom, list => (list.includes(k) ? list.filter(x => x !== k) : [...list, k].slice(-50)))
     // a file's changes against the last commit (an untracked file: all of it as added)
     const fileDiff = async (root: string, rel: string, untracked: boolean) =>
-      untracked ? await git(root, ['diff', '--no-index', '--', '/dev/null', rel]) : await git(root, ['diff', 'HEAD', '--', rel])
+      untracked ? await git(root, ['diff', '--no-index', ...wsArgs, '--', '/dev/null', rel]) : await git(root, ['diff', ...wsArgs, 'HEAD', '--', rel])
     const diffBlock = (k: string, text: string) => {
       const shown = text.slice(0, Math.max(0, budget))
       budget -= shown.length
@@ -1574,8 +1632,8 @@ export const register: Register = on => {
       const label = (x: string) => (x === '??' ? 'new' : x.includes('M') ? 'changed' : x.includes('A') ? 'added' : x.includes('D') ? 'deleted' : x.includes('R') ? 'renamed' : x.trim())
       const rows =
         tab === 'changes'
-          ? (await read($, changesAtom)).map(c => ({ path: c.path, rel: rel(c.path).replace(/\\/g, '/'), note: `${c.tool}${c.n > 1 ? ` ×${c.n}` : ''} · ${new Date(c.at).toLocaleTimeString()}` }))
-          : [...states.entries()].map(([r, x]) => ({ path: join(root, r), rel: r, note: label(x) }))
+          ? (await read($, changesAtom)).map(c => ({ path: c.path, rel: rel(c.path).replace(/\\/g, '/'), note: `${c.tool}${c.n > 1 ? ` ×${c.n}` : ''} · ${new Date(c.at).toLocaleTimeString()}`, before: c.before }))
+          : [...states.entries()].map(([r, x]) => ({ path: join(root, r), rel: r, note: label(x), before: undefined as string | undefined }))
       const branch = tab === 'git' ? (await git(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim() : ''
       const out = []
       for (const row of rows) {
@@ -1596,6 +1654,15 @@ export const register: Register = on => {
               })()}>
                 Open
               </Button>
+              {row.before ? (
+                // Claude's own change: the file against the copy made before its first edit this session
+                <Button key={`cl:${k}`} label="± Claude's change" plain onPress={() => void (async () => {
+                  await update($, diffBaseAtom, () => ({ path: row.path, base: 'claude' }))
+                  await update($, diffOpenAtom, list => [...list.filter(x => x !== `filediff:${row.path}`), `filediff:${row.path}`].slice(-50))
+                  await update($, viewAtom, () => 'files')
+                  await openPath(row.path)
+                })()} />
+              ) : null}
             </Box>
             {diffOpen.has(k) ? diffBlock(k, await fileDiff(root, row.rel, st === '??')) : null}
           </Box>,
@@ -2452,9 +2519,43 @@ export const register: Register = on => {
       const f = open
       const key = `${f.path}|${f.start}`
       const diffKey = `filediff:${f.path}`
-      const fileDiffText = showDiff.includes(diffKey)
-        ? (await $.process.run(['git', '-c', 'core.quotepath=false', 'diff', 'HEAD', '--', f.path], { cwd: parent(f.path), timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout
-        : ''
+      // ± Diff against: the last commit, the newest backup of this file, or the copy from before Claude's first edit
+      const savedBase = await read($, diffBaseAtom)
+      const claudeBefore = (await read($, changesAtom)).find(c => c.path.toLowerCase() === f.path.toLowerCase())?.before
+      const newestBackup = (await read($, backupLogAtom)).find(b => b.original.toLowerCase() === f.path.toLowerCase() && b.backup !== claudeBefore)
+      const base = savedBase.path === f.path && (savedBase.base !== 'backup' || newestBackup) && (savedBase.base !== 'claude' || claudeBefore !== undefined) ? savedBase.base : 'commit'
+      const against = base === 'claude' ? claudeBefore : base === 'backup' ? newestBackup?.backup : undefined
+      const setBase = (b: DiffBase['base']) => update($, diffBaseAtom, () => ({ path: f.path, base: b }))
+      const runDiff = (args: string[]) =>
+        $.process
+          .run(['git', '-c', 'core.quotepath=false', 'diff', ...args], { cwd: parent(f.path), timeoutMs: 20_000 })
+          .then(r => r.stdout)
+          .catch(() => '')
+      const fileDiffText = !showDiff.includes(diffKey)
+        ? ''
+        : base === 'commit'
+          ? await runDiff([...wsArgs, 'HEAD', '--', f.path])
+          : against
+            ? await runDiff(['--no-index', '--no-color', ...wsArgs, '--', against, f.path])
+            : ''
+      const comparedWith =
+        base === 'commit'
+          ? 'the last commit'
+          : base === 'backup'
+            ? `the backup from ${new Date(newestBackup?.at ?? 0).toLocaleTimeString()} (${String(against)})`
+            : against
+              ? `the file before Claude's first edit this session (${against})`
+              : "nothing: Claude made this file this session, so all of it is Claude's"
+      // Put back what Claude changed: the current version backed up first, then the copy from before its first edit
+      const putBackClaude = async () => {
+        if (!claudeBefore) return
+        const now = await backupOf(f.path)
+        if (!now.ok) return say(`Not put back: couldn't copy the current version first (${String(now.error ?? 'unknown')}).`)
+        const r = await helper(['restore', claudeBefore, f.path])
+        if (!r.ok) return say(`Not put back: ${String(r.error ?? 'unknown')}.`)
+        await openPath(f.path)
+        await say(`Put back the file from before Claude's edits; the version it replaced is in ${String(now.backup)}.`)
+      }
       return (
         <Box flexDirection="column" gap={1}>
           {header}
@@ -2506,12 +2607,21 @@ export const register: Register = on => {
             ) : null}
           </Box>
           {noteBlock(f.path)}
-          {showDiff.includes(diffKey) ? sideToggle : null}
           {showDiff.includes(diffKey) ? (
+            <Box key="diff-against" flexDirection="row" gap={1} flexWrap="wrap">
+              <Button key="base-commit" label="vs last commit" variant={base === 'commit' ? 'primary' : 'secondary'} onPress={() => void setBase('commit')} />
+              {newestBackup ? <Button key="base-backup" label="vs newest backup" variant={base === 'backup' ? 'primary' : 'secondary'} onPress={() => void setBase('backup')} /> : null}
+              {claudeBefore !== undefined ? <Button key="base-claude" label="vs before Claude's edits" variant={base === 'claude' ? 'primary' : 'secondary'} onPress={() => void setBase('claude')} /> : null}
+              {base === 'claude' && claudeBefore ? <Button key="claude-putback" label="↩ Put back (undo Claude's edits)" onPress={() => void putBackClaude()} /> : null}
+            </Box>
+          ) : null}
+          {showDiff.includes(diffKey) ? sideToggle : null}
+          {showDiff.includes(diffKey) ? <Text wrap={wrapMode} dimColor>{`Compared with ${comparedWith}`}</Text> : null}
+          {showDiff.includes(diffKey) && (base === 'commit' || against) ? (
             fileDiffText.trim() ? (
               diffView('filediff', fileDiffText.slice(0, 60_000))
             ) : (
-              <Text wrap={wrapMode} dimColor>No changes since the last commit (or not in git).</Text>
+              <Text wrap={wrapMode} dimColor>{base === 'commit' ? 'No changes since the last commit (or not in git).' : 'No differences.'}</Text>
             )
           ) : null}
           {!wrap && Code && !f.binary ? (

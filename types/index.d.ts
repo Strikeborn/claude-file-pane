@@ -26,7 +26,16 @@ export type Tick = { path: string; item: string; headings: string[]; done: boole
 export type BinView = { path: string; mode: 'info' | 'text' | 'hex' | 'files' | 'java' | 'diff'; at: number };
 
 /** A file Claude edited this session (from its Edit / Write / NotebookEdit calls). */
-export type Change = { path: string; tool: string; at: number; n: number };
+export type Change = {
+  path: string;
+  tool: string;
+  at: number;
+  n: number;
+  /** A backup of the file from before Claude's first edit of it this session ('' when the file was new). */
+  before?: string;
+};
+/** What a text file's ± Diff compares it with: the last commit, its newest backup, or before Claude's edits. */
+export type DiffBase = { path: string; base: 'commit' | 'backup' | 'claude' };
 /** The last run of a project script (Checks). */
 export type CheckResult = { ok: boolean; at: number; secs: number; summary: string; failures: string[]; tail: string };
 
@@ -44,7 +53,7 @@ declare module 'claude-code' {
       lastBackup: string;
       /** Files, or the Project view of the session's folder. */
       view: 'files' | 'project';
-      projectTab: 'next' | 'timeline' | 'items' | 'features' | 'blocks' | 'changes' | 'git' | 'checks' | 'search' | 'backups' | 'log' | 'notes';
+      projectTab: 'next' | 'timeline' | 'items' | 'ticks' | 'features' | 'blocks' | 'changes' | 'git' | 'checks' | 'search' | 'backups' | 'log' | 'notes';
       /** Items: done ones shown too. */
       itemsAll: boolean;
       /** Sections / blocks flipped from their default (open in a short document, folded in a long one). */
@@ -71,6 +80,10 @@ declare module 'claude-code' {
       logErrorsOnly: boolean;
       /** Diffs drawn as two columns (before | after) instead of one. */
       sideBySide: boolean;
+      /** Diffs leave out changes in spaces, tabs, line endings and blank lines. */
+      ignoreSpace: boolean;
+      /** What the open text file's ± Diff compares it with. */
+      diffBase: DiffBase;
       /** Long lines wrap onto more rows (true), or stay one row cut at the edge (false); every view. */
       wrap: boolean;
       /** The file whose note is being written. */

@@ -1,4 +1,5 @@
 import { expect, test } from 'claude-code/testing'
+import { wordDiff } from '../hooks/project'
 
 // The Files pane drawn as the desktop app draws it, in a folder like the one where it stayed blank
 // (F:\GT racing IPAD: not a git repository, one links.txt). The engine's answers are this test's hooks.
@@ -413,5 +414,93 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   expect(runs.some(r => r.argv[3] === 'ilspy' && String(r.argv[5]).endsWith('file-pane-cache'))).toBe(true)
 
   expect(runs.filter(r => /cmd(\.exe)?$/i.test(r.argv[0] ?? '')).map(r => r.argv.join(' '))).toEqual([])
+  await ui.unmount()
+})
+
+// Better diffs: Claude's own change (a copy made before its first Edit), against the newest backup or the last commit,
+// ␣ Ignore spaces, the words that changed, and Put back for Claude's edits (current version backed up first).
+test('diffs: Claude\'s change, vs backup / commit, ignore spaces, word highlights, put back', async ($, on) => {
+  const DIR = 'F:\\proj'
+  const FILE = `${DIR}\\app.ts`
+  const BEFORE = 'C:\\Users\\tester\\.claude\\file-pane-backups\\2026-11-03T20-00-00-000Z-app.ts'
+  const runs: (readonly string[])[] = []
+  on('command.register', () => ({ value: { command: 'files' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__file-pane__open' } }))
+  on('tool.call', () => ({ result: 'edited', text: 'edited' }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: DIR }))
+  on('env.get', () => ({ value: 'C:\\Users\\tester' }))
+  on('fs.list', (_, e) => ({ value: String(e.path ?? '') === DIR ? [{ name: 'app.ts', kind: 'file', size: 20, mtimeMs: 1, isLink: false }] : [] }))
+  on('fs.exists', () => ({ value: false }))
+  on('fs.stat', (_, e) => ({ value: /\.ts$/i.test(String(e.path)) ? { kind: 'file', size: 20, mtimeMs: 1, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }))
+  on('fs.read', (_, e) => {
+    if (String(e.path) === FILE) return { value: 'const speed = 2\n' }
+    throw new Error('ENOENT')
+  })
+  on('store.get', () => ({ value: undefined }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    runs.push(e.argv)
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    const [exe, , , cmd] = e.argv
+    if (exe === 'node' && cmd === 'backup') return out(JSON.stringify({ ok: true, backup: runs.filter(r => r[3] === 'backup').length === 1 ? BEFORE : 'C:\\Users\\tester\\.claude\\file-pane-backups\\now-app.ts' }))
+    if (exe === 'node' && cmd === 'restore') return out('{"ok":true}')
+    if (exe === 'git' && e.argv.includes('diff')) return out('@@ -1 +1 @@\n-const speed = 1\n+const speed = 2\n', e.argv.includes('--no-index') ? 1 : 0)
+    return out('', 128)
+  })
+  const shows = async (re: RegExp) => {
+    for (let i = 0; i < 20 && !(await ui.find({ text: re })); i++) await ui.drawn()
+    return ui.find({ text: re })
+  }
+  const lastDiff = () => [...runs].reverse().find(r => r[0] === 'git' && r.includes('diff')) ?? []
+
+  // the words that changed, as the side-by-side view highlights them
+  expect(wordDiff('const speed = 1', 'const speed = 2')).toEqual({
+    left: [{ text: 'const speed = ', changed: false }, { text: '1', changed: true }],
+    right: [{ text: 'const speed = ', changed: false }, { text: '2', changed: true }],
+  })
+
+  await $.session.start({ cwd: DIR, surface: 'desktop', isInteractive: true })
+  // Claude edits the file: a copy is made first, once per file a session
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: '1', new_string: '2' })
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x', new_string: 'y' })
+  expect(runs.filter(r => r[3] === 'backup').map(r => r[4])).toEqual([FILE])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // Changes: ± Claude's change opens the file with its diff against that copy
+  await ui.press({ key: 'v-project' })
+  await ui.press({ key: 'tab:changes' })
+  await ui.press({ key: 'cl:changes:app.ts' })
+  expect(await shows(/Compared with the file before Claude's first edit/)).toBeDefined()
+  for (let i = 0; i < 20 && !lastDiff().includes('--no-index'); i++) await ui.drawn()
+  expect(lastDiff().slice(-3)).toEqual(['--', BEFORE, FILE])
+
+  // side by side: each line beside its pair
+  await ui.press({ key: 'side' })
+  expect(await shows(/^- const speed = 1$/)).toBeDefined()
+  expect(await shows(/^\+ const speed = 2$/)).toBeDefined()
+
+  // ␣ Ignore spaces: git leaves out space-only changes
+  await ui.press({ key: 'ws' })
+  for (let i = 0; i < 20 && !lastDiff().includes('--ignore-all-space'); i++) await ui.drawn()
+  expect(lastDiff()).toContain('--ignore-blank-lines')
+
+  // vs last commit, and back to Claude's change
+  await ui.press({ key: 'base-commit' })
+  expect(await shows(/Compared with the last commit/)).toBeDefined()
+  for (let i = 0; i < 20 && !lastDiff().includes('HEAD'); i++) await ui.drawn()
+  expect(lastDiff()).toContain('HEAD')
+  await ui.press({ key: 'base-claude' })
+
+  // Put back: the current version is backed up, then the copy from before Claude's edits is restored
+  await ui.press({ key: 'claude-putback' })
+  for (let i = 0; i < 20 && !runs.some(r => r[3] === 'restore'); i++) await ui.drawn()
+  expect(runs.find(r => r[3] === 'restore')!.slice(4)).toEqual([BEFORE, FILE])
+  expect(runs.filter(r => r[3] === 'backup').length).toBe(2)
+  // the current version's copy is now the newest backup: vs newest backup compares with it
+  await ui.press({ key: 'base-backup' })
+  expect(await shows(/Compared with the backup from/)).toBeDefined()
   await ui.unmount()
 })
