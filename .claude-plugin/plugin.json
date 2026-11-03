@@ -1,6 +1,6 @@
 {
   "name": "file-pane",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "A pane beside the chat to browse folders and edit text files (big files page by page, a backup before every save)",
   "types": "./types/index.d.ts"
 }

@@ -74,9 +74,8 @@ especially `App security checks.md`. When this mod gains a check worth comparing
 - PowerShell: pass values as single-quoted literals (`'` doubled) or through environment variables, never spliced raw.
 - Caches and temp files go in `%USERPROFILE%\.claude\` (e.g. `file-pane-cache`), never in the project or a synced
   folder; nothing is uploaded anywhere.
-- Other apps' data is read only, and from their own safe copies: Model Organizer's `backups\library-latest.db`, never
-  its live `library.db`; ModKeeper's data read only. Their 18+ settings apply: hide 18+ items unless the user turns
-  them on.
+- The pane doesn't read other apps' data: Strike doesn't want Model Organizer or ModKeeper integrated (2026-11-03).
+  If another app's data is ever needed, read only and from its own safe copy, never a live database.
 - A `.blend` can carry Python: Blender only with `--factory-startup --disable-autoexec`, files opened with scripts off
   (Model Organizer's `worker.py` / `inspect_scripts.py` show how).
 - Outside programs (Heimdall3D, 7-Zip, Blender) run only from Program Files, with a timeout, on one file at a time, and

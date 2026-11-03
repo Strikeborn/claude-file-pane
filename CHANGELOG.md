@@ -3,6 +3,9 @@
 Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
+
+## 0.3.2 (deployed 2026-11-03 16:10)
+- Model Organizer / ModKeeper integration dropped from the plans (Strike doesn't want it).
 - A cached Heimdall render says "GPU" too (Strike saw "heimdall_probe" without it on the star, which was a GPU
   render made earlier by hand); a plain fallback render is kept as `<key>-plain.png`.
 
