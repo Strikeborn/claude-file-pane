@@ -33,12 +33,15 @@ export type Change = {
   n: number;
   /** A backup of the file from before Claude's first edit of it this session ('' when the file was new). */
   before?: string;
+  /** A backup from before each of Claude's edits of it this session, oldest first (the last 20). */
+  edits?: { at: number; before: string }[];
 };
 /**
- * What a text file's ± Diff compares it with: the last commit, one of its backups (`backup`, else the newest), before
- * Claude's edits, or another file (`other`: the one opened before it).
+ * What a text file's ± Diff compares it with: the last commit, one of its backups (`backup`, else the newest; against
+ * another backup `versus` instead of the file now), before Claude's edits (`edit`: before which of them, 0 = the
+ * first), or another file (`other`: the one opened before it).
  */
-export type DiffBase = { path: string; base: 'commit' | 'backup' | 'claude' | 'other'; backup?: string; other?: string };
+export type DiffBase = { path: string; base: 'commit' | 'backup' | 'claude' | 'other'; backup?: string; versus?: string; edit?: number; other?: string };
 /** The last run of a project script (Checks). */
 export type CheckResult = { ok: boolean; at: number; secs: number; summary: string; failures: string[]; tail: string };
 
@@ -98,6 +101,10 @@ declare module 'claude-code' {
       /** A binary file's view: what it is (info), its readable text, its bytes, the files in a zip / jar, a class's
        * bytecode (java), or its diff against the last commit; `at` the byte a text / hex page starts at. */
       binView: BinView;
+      /** 🗂 Files inside a big zip: the part of a name looked for (`path` the zip it's for). */
+      zipFilter: { path: string; text: string };
+      /** A zip / jar's ± Diff: the file inside it whose own diff is shown (`path` the zip). */
+      zipEntry: { path: string; name: string };
       /** The last tick / untick, for its Undo (line `line` of `path` now reads `raw`). */
       lastTick: Tick | null;
       /** Markdown files in ✎ Edit mode: a click on an item or heading edits it instead of ticking. */

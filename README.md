@@ -3,7 +3,7 @@
 A pane beside the Claude Code chat for browsing folders, reading and editing files, and keeping an eye on the project
 the chat is working in. It's a Claude Code mod (hooks module), not an MCP server or an app.
 
-Plugin name: `file-pane` · version 0.4.0 · open it with `/files` (or Claude can open it on a file with the
+Plugin name: `file-pane` · version 0.5.0 · open it with `/files` (or Claude can open it on a file with the
 `mcp__file-pane__open` tool; `mcp__file-pane__ticks` lists the checkboxes ticked through it).
 
 ## What it does
@@ -26,11 +26,13 @@ Plugin name: `file-pane` · version 0.4.0 · open it with `/files` (or Claude ca
   - **🗂 Files inside** a zip / jar (and .apk, .nupkg, .vsix, .docx…): size, date and name of each entry, read from
     the zip's own directory (zip64 archives aren't listed). Up to 300 files, each is a button that opens a copy of it
     (copied out to `~/.claude/file-pane-cache/zip`, its CRC checked; editing the copy changes nothing in the archive).
+    More than 300: a 🔎 box finds files by part of their name, and each match is a button.
   - **☕ Bytecode (javap)** for a Java `.class`: `javap -c -p` from a JDK under Program Files.
   - **± Diff** against the last commit, as ModKeeper's update review does it: the readable text old vs new, the hex
     around where the bytes differ (one inserted / removed block is shown as such, not every later line changed), for a
     `.class` the bytecode diff (javap on both copies; when the bytecode is the same, what moved in its debug info:
-    `javap -l` line numbers and local names), for a zip / jar which files inside were added, removed or changed, and
+    `javap -l` line numbers and local names), for a zip / jar which files inside were added, removed or changed (press
+    one for its own diff: a class by javap, text as text, else readable text and hex), and
     for a .NET DLL **C# diff (ILSpy)** on a press (ILSpy on both copies, each cached).
 - Pictures are drawn as SVG through Windows imaging (the desktop pane has no Image).
 - 3D models and other files Explorer can preview (.fbx .obj .stl .3mf .ply .dae .glb .gltf .blend .exr .hdr .dds
@@ -51,10 +53,11 @@ Plugin name: `file-pane` · version 0.4.0 · open it with `/files` (or Claude ca
   ✎ Edit turns Wrap back on. Markdown documents always wrap (the engine's Markdown has no setting either).
 - ± Diff of a file, one column or ⇆ side by side (there, the words that changed inside a line are highlighted), with
   **␣ Ignore spaces** (spaces, tabs, line endings, blank lines). A text file compares with **the last commit**, its
-  **backups** (the newest, or any of the newest 8), **the file opened before it** (open one, then the other, and
-  press "vs <name>"), or **the file before Claude's edits**: before Claude's first Edit / Write of a file in a session
-  the pane copies it to the backups folder, so Changes has **± Claude's change** per file and **↩ Put back** undoes
-  Claude's edits (the current version backed up first). A picture's last-commit copy is a temp file in
+  **backups** (the newest, or any of the newest 8, against the file now or against another backup), **the file opened
+  before it** (open one, then the other, and press "vs <name>"), or **the file before Claude's edits**: before each of
+  Claude's Edit / Write calls on a file the pane copies it to the backups folder, so Changes has **± Claude's change**
+  per file (all of this session's edits, or from one edit on) and **↩ Put back** undoes them (all, or from that edit
+  on; the current version backed up first). A picture's last-commit copy is a temp file in
   `~/.claude/file-pane-cache`, removed after drawing.
 - Open in VS Code button (runs VS Code's own `Code.exe` + `cli.js`, found from its `code` command; no shell, so any file
   name is safe), Show in Explorer, open in its own app.

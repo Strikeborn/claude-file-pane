@@ -47,6 +47,8 @@ const ignoreSpaceAtom =atom({ plugin: 'file-pane', key: 'ignoreSpace' } as const
 const diffBaseAtom = atom({ plugin: 'file-pane', key: 'diffBase' } as const, { path: '', base: 'commit' } as DiffBase)
 const wrapAtom = atom({ plugin: 'file-pane', key: 'wrap' } as const, true)
 const binViewAtom = atom({ plugin: 'file-pane', key: 'binView' } as const, { path: '', mode: 'info', at: 0 } as BinView)
+const zipFilterAtom = atom({ plugin: 'file-pane', key: 'zipFilter' } as const, { path: '', text: '' })
+const zipEntryAtom = atom({ plugin: 'file-pane', key: 'zipEntry' } as const, { path: '', name: '' })
 const lastTickAtom = atom({ plugin: 'file-pane', key: 'lastTick' } as const, null as Tick | null)
 const editModeAtom = atom({ plugin: 'file-pane', key: 'editMode' } as const, [] as string[])
 const openOnlyAtom = atom({ plugin: 'file-pane', key: 'openOnly' } as const, [] as string[])
@@ -64,6 +66,8 @@ let loadedStamp: { version: string; at: string } | null = null
 const binCache = new Map<string, Record<string, unknown>>()
 // a DLL's C# diff (ILSpy on both copies), by path and modified time: made on a press, drawn after
 const csDiffs = new Map<string, Record<string, unknown>>()
+// one file inside a zip / jar diffed against the last commit's (by zip path, modified time, name): made on a press
+const entryDiffs = new Map<string, Record<string, unknown>>()
 // a picture or model preview as the pane draws it (a small PNG / JPEG, base64), by kind|path|size|modified, and the
 // ones being drawn now (in the background: a model's render can take seconds)
 type Thumb = { w: number; h: number; tw: number; th: number; b64: string; mime?: string; via?: string }
@@ -435,7 +439,7 @@ const zipEntries = (file) => {
 };
 const zipList = (file) => {
   const z = zipEntries(file);
-  return z.error ? z : { count: z.count, bytes: z.bytes, lines: z.entries.map(e => String(e.usize).padStart(11, ' ') + '  ' + e.when + '  ' + e.name), files: z.entries.slice(0, 301).map(e => ({ name: e.name, size: e.usize })) };
+  return z.error ? z : { count: z.count, bytes: z.bytes, lines: z.entries.map(e => String(e.usize).padStart(11, ' ') + '  ' + e.when + '  ' + e.name), files: z.entries.map(e => ({ name: e.name, size: e.usize })) };
 };
 // two zips / jars file by file (by name, CRC and size): added +, removed -, changed ~
 const zipCompare = (fa, fb) => {
@@ -451,13 +455,12 @@ const zipCompare = (fa, fb) => {
   for (const o of old.values()) out.push('- ' + o.name + '  (' + o.usize + ' bytes)');
   return out.sort((p, q) => p.slice(2).localeCompare(q.slice(2))).slice(0, 2000);
 };
-// one file out of a zip / jar, into <cache>\zip\<hash of the zip's version and the name>\<its name> (stored or
-// deflated only, 64 MB at most, its CRC checked); of the entry's name only its last part is used, cleaned
-const zipGet = (file, name, cache) => {
+// one file's bytes out of a zip / jar, in memory: { data } or { error } ({ missing } when it isn't in it)
+const zipRead = (file, name) => {
   const z = zipEntries(file);
   if (z.error) return z;
   const e = z.entries.find(x => x.name === name);
-  if (!e || name.endsWith('/')) return { error: 'no such file in it' };
+  if (!e || name.endsWith('/')) return { error: 'no such file in it', missing: true };
   if (e.flags & 1) return { error: 'it is encrypted' };
   if (e.method !== 0 && e.method !== 8) return { error: 'packed in a way not read here (method ' + e.method + ')' };
   if (e.usize > 64 * 1024 * 1024) return { error: 'too big to copy out here (over 64 MB)' };
@@ -466,7 +469,36 @@ const zipGet = (file, name, cache) => {
   const raw = readPart(file, e.local + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28), e.csize);
   const data = e.method === 0 ? raw : zlib.inflateRawSync(raw, { maxOutputLength: 64 * 1024 * 1024 });
   if (typeof zlib.crc32 === 'function' && zlib.crc32(data) >>> 0 !== e.crc) return { error: 'its data is damaged (CRC differs)' };
-  const st = fs.statSync(file);
+  return { data };
+};
+// one file inside two copies of a zip / jar, compared: a class by javap (both written to <cache>\diff and removed
+// after), text as text, anything else as its readable text and hex. An added / removed file compares with nothing.
+const zipEntryDiff = (oldZip, newZip, name, cache, pf) => {
+  const x = zipRead(oldZip, name), y = zipRead(newZip, name);
+  if ((x.error && !x.missing) || (y.error && !y.missing)) return { error: x.error || y.error };
+  const a = x.data || Buffer.alloc(0), b = y.data || Buffer.alloc(0);
+  if (a.equals(b)) return { same: true };
+  if (/\.class$/i.test(name) && a.length && b.length) {
+    const exe = findJavap(pf);
+    if (exe) {
+      const dir = path.join(cache, 'diff'), base = path.join(dir, process.pid + '-' + Date.now()), fa = base + '-old.class', fb = base + '-new.class';
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(fa, a); fs.writeFileSync(fb, b);
+      try {
+        const diff = textDiff(cache, javapOf(exe, fa) + '\n', javapOf(exe, fb) + '\n');
+        return { kind: 'javap', diff: diff.trim() ? diff : textDiff(cache, javapOf(exe, fa, ['-l', '-p']) + '\n', javapOf(exe, fb, ['-l', '-p']) + '\n'), debug: !diff.trim() };
+      } finally { fs.rmSync(fa, { force: true }); fs.rmSync(fb, { force: true }); }
+    }
+  }
+  if (!a.subarray(0, 8000).includes(0) && !b.subarray(0, 8000).includes(0)) return { kind: 'text', diff: textDiff(cache, a.toString('utf8'), b.toString('utf8')) };
+  return { kind: 'binary', diff: textDiff(cache, stringsOf(a).join('\n') + '\n', stringsOf(b).join('\n') + '\n'), hex: hexDiff(a, b) };
+};
+// one file out of a zip / jar, into <cache>\zip\<hash of the zip's version and the name>\<its name> (stored or
+// deflated only, 64 MB at most, its CRC checked); of the entry's name only its last part is used, cleaned
+const zipGet = (file, name, cache) => {
+  const got = zipRead(file, name);
+  if (got.error) return { error: got.error };
+  const data = got.data, st = fs.statSync(file);
   const dir = path.join(cache, 'zip', require('crypto').createHash('sha1').update(path.resolve(file).toLowerCase() + '|' + st.size + '|' + st.mtimeMs + '|' + name).digest('hex').slice(0, 16));
   const dest = path.join(dir, (name.split(/[\\/]/).pop() || 'file').replace(/[^\w.-]/g, '_').replace(/^\.+/, '_'));
   fs.mkdirSync(dir, { recursive: true });
@@ -595,6 +627,9 @@ try {
   } else if (cmd === 'zipget') {
     // zipget <zip> <name> <cache dir>: one file out of a zip / jar into the cache, to open read only
     out(zipGet(a[0], a[1], a[2]));
+  } else if (cmd === 'zipentry') {
+    // zipentry <old zip> <new zip> <name> <cache dir> <Program Files>: that one file in both copies, compared
+    out(zipEntryDiff(a[0], a[1], a[2], a[3], a[4]));
   } else if (cmd === 'bindiff') {
     // bindiff <old> <new> <cache dir>: two versions of a binary, as their readable text (a unified diff) and the hex
     // around where the bytes differ. 64 MiB each at most; read only.
@@ -808,19 +843,20 @@ async function recordChange($: EngineInterface, path: unknown, tool: string, ok:
     const old = list.find(c => c.path.toLowerCase() === path.toLowerCase())
     const rest = list.filter(c => c !== old)
     const kept = old?.before ?? before
-    return [{ path, tool, at: Date.now(), n: (old?.n ?? 0) + 1, ...(kept !== undefined ? { before: kept } : {}) }, ...rest].slice(0, 300)
+    // each edit's own copy too (a new file's first edit has none)
+    const edits = [...(old?.edits ?? []), ...(before ? [{ at: Date.now(), before }] : [])].slice(-20)
+    return [{ path, tool, at: Date.now(), n: (old?.n ?? 0) + 1, ...(kept !== undefined ? { before: kept } : {}), ...(edits.length ? { edits } : {}) }, ...rest].slice(0, 300)
   })
 }
 
 /**
- * Before Claude's first Edit / Write of a file this session: a backup copy of it (the pane's backups folder, listed in
- * Backups), so ± Diff can show Claude's change and Put back can undo it. '' for a file that doesn't exist yet;
- * undefined when no copy was made (already made, a folder, over 32 MB, no Node). Never stops the edit.
+ * Before each of Claude's Edit / Write calls on a file: a backup copy of it (the pane's backups folder, listed in
+ * Backups), so ± Diff can show Claude's change (all of this session's, or from one edit on) and Put back can undo it.
+ * '' for a file that doesn't exist yet; undefined when no copy was made (a folder, over 32 MB, no Node). Never stops
+ * the edit.
  */
 async function snapshotBefore($: EngineInterface, path: unknown): Promise<string | undefined> {
   if (typeof path !== 'string' || !path) return undefined
-  const known = (await read($, changesAtom)).find(c => c.path.toLowerCase() === path.toLowerCase())
-  if (known && known.before !== undefined) return known.before
   const st = await $.fs.stat(path).catch(() => null)
   if (!st) return ''
   if (st.kind !== 'file' || st.size > 32 * 1024 * 1024) return undefined
@@ -2653,7 +2689,36 @@ export const register: Register = on => {
         if (csDiffs.size > 10) csDiffs.delete(csDiffs.keys().next().value!)
         await say(d.error ? `No C# diff: ${String(d.error)}` : 'C# diff ready (below the bytecode parts).')
       }
-      const zipFiles = Array.isArray(r.files) ? (r.files as { name: string; size: number }[]) : []
+      const zipFiles = bv.mode === 'files' && Array.isArray(r.files) ? (r.files as { name: string; size: number }[]) : []
+      // up to 300 files: each a button; more: the list as text, and a box to find files by part of their name
+      const zf = await read($, zipFilterAtom)
+      const zipFind = zf.path === f.path ? zf.text.trim().toLowerCase() : ''
+      const bigZip = zipFiles.length > 300
+      const zipShown = zipFind ? zipFiles.filter(z => z.name.toLowerCase().includes(zipFind)) : bigZip ? [] : zipFiles
+      // a zip / jar's ± Diff: one changed file inside it, diffed on a press (the last commit's copy as a temp file)
+      const ze = await read($, zipEntryAtom)
+      const entryName = ze.path === f.path ? ze.name : ''
+      const entryKey = (name: string) => `${f.path}|${f.mtimeMs}|${name}`
+      const entryDiff = entryName ? entryDiffs.get(entryKey(entryName)) : undefined
+      const diffEntry = async (name: string) => {
+        await update($, zipEntryAtom, () => ({ path: f.path, name }))
+        if (entryDiffs.has(entryKey(name))) return
+        await say(`Comparing ${name} with the last commit's…`)
+        const tmp = join(cacheDir, `last-commit-${Date.now()}${f.path.slice(f.path.lastIndexOf('.'))}`)
+        const g = await helper(['gitblob', f.path, tmp])
+        const d = g.ok ? await helper(['zipentry', tmp, f.path, name, cacheDir, programs]) : { error: 'not in git at the last commit' }
+        if (g.ok) void helper(['rmtemp', cacheDir, tmp])
+        entryDiffs.set(entryKey(name), d)
+        if (entryDiffs.size > 30) entryDiffs.delete(entryDiffs.keys().next().value!)
+        await say(d.error ? `No diff of ${name}: ${String(d.error)}` : d.same ? `${name} is the same as at the last commit.` : `${name}: its diff is under the list of files.`)
+      }
+      const entryTitle = !entryDiff
+        ? ''
+        : entryDiff.kind === 'javap'
+          ? `${entryName}: ${entryDiff.debug ? 'debug info (javap -l; the bytecode is the same)' : 'bytecode (javap -c -p)'}`
+          : entryDiff.kind === 'binary'
+            ? `${entryName}: readable text`
+            : entryName
       return (
         <Box flexDirection="column" gap={1}>
           {header}
@@ -2675,18 +2740,33 @@ export const register: Register = on => {
             <Button key="bin-diff" label="± Diff" variant={bv.mode === 'diff' ? 'primary' : 'secondary'} onPress={() => void setBv({ mode: 'diff', at: 0 })} />
             {bv.mode === 'diff' ? sideToggle : null}
             {bv.mode === 'diff' && /\.(dll|exe)$/i.test(f.path) && !r.error && !r.same ? <Button key="bin-csdiff" label="C# diff (ILSpy)" variant={csDiff ? 'primary' : 'secondary'} onPress={() => void diffCs()} /> : null}
-            {bv.mode === 'info' && r.dotnet ?<Button key="bin-cs" label="C# (ILSpy)" onPress={() => void decompile()} /> : null}
+            {bv.mode === 'info' && r.dotnet ? <Button key="bin-cs" label="C# (ILSpy)" onPress={() => void decompile()} /> : null}
           </Box>
           {r.error ? <Text wrap={wrapMode} color="error">{bv.mode === 'diff' ? `No diff: ${String(r.error)}` : `Couldn't read it: ${String(r.error)}`}</Text> : null}
           {bv.mode === 'files' && !r.error ? (
             <Text wrap={wrapMode} dimColor>
-              {`${Number(r.count ?? lines.length).toLocaleString('en-US')} entries, ${sizeText(Number(r.bytes ?? 0))} unpacked${lines.length >= 20000 ? ' · first 20,000 shown' : ''} · read from its directory, nothing unpacked${zipFiles.length > 0 && zipFiles.length <= 300 ? ' · press one to open a copy of it' : ''}`}
+              {`${Number(r.count ?? lines.length).toLocaleString('en-US')} entries, ${sizeText(Number(r.bytes ?? 0))} unpacked${lines.length >= 20000 ? ' · first 20,000 shown' : ''} · read from its directory, nothing unpacked${zipShown.length > 0 ? ' · press one to open a copy of it' : ''}`}
             </Text>
           ) : null}
-          {bv.mode === 'files' && !r.error && zipFiles.length > 0 && zipFiles.length <= 300 ? (
-            // up to 300 files: each a button that opens a copy of it (more: the list as text, below)
+          {bv.mode === 'files' && !r.error && bigZip && Input ? (
+            <Box key="zip-find-row" flexDirection="column">
+              <Input
+                key="zip-find"
+                label="🔎"
+                placeholder="Find files in it by part of their name (Enter)"
+                value={zf.path === f.path ? zf.text : ''}
+                submitLabel="find"
+                onSubmit={(v: string) => void update($, zipFilterAtom, () => ({ path: f.path, text: v }))}
+              />
+              {zipFind ? (
+                <Text dimColor wrap={wrapMode}>{`${zipShown.length.toLocaleString('en-US')} match "${zipFind}"${zipShown.length > 300 ? ' · first 300 shown' : ''}`}</Text>
+              ) : null}
+            </Box>
+          ) : null}
+          {bv.mode === 'files' && !r.error && zipShown.length > 0 ? (
+            // each file a button that opens a copy of it
             <Box key="zip-files" flexDirection="column">
-              {zipFiles.map((z, i) =>
+              {zipShown.slice(0, 300).map((z, i) =>
                 z.name.endsWith('/') ? (
                   <Text key={`zd${i}`} dimColor wrap={wrapMode}>{`📁 ${z.name}`}</Text>
                 ) : (
@@ -2718,13 +2798,34 @@ export const register: Register = on => {
                             {(r.files as string[]).length === 0 ? (
                               <Text key="z-same" dimColor wrap={wrapMode}>The same files (only how they're packed changed).</Text>
                             ) : (
-                              (r.files as string[]).slice(0, 400).map((l, i) => (
-                                <Text key={`zc${i}`} wrap={wrapMode} color={l.startsWith('-') ? 'diffRemoved' : l.startsWith('+') ? 'diffAdded' : 'warning'}>
-                                  {l}
-                                </Text>
-                              ))
+                              // each a button: that file's own diff (a class by javap) under the list
+                              (r.files as string[]).slice(0, 400).map((l, i) => {
+                                const name = l.slice(2).replace(/ {2}\([^)]*\)$/, '')
+                                return (
+                                  <Box key={`zcrow${i}`} flexDirection="row" gap={1}>
+                                    <Text color={l.startsWith('-') ? 'diffRemoved' : l.startsWith('+') ? 'diffAdded' : 'warning'}>{l[0]}</Text>
+                                    <Button key={`zc:${i}`} label={l.slice(2)} plain variant={name === entryName ? 'primary' : 'secondary'} onPress={() => void diffEntry(name)} />
+                                  </Box>
+                                )
+                              })
                             )}
                           </Box>,
+                          ...(entryDiff
+                            ? [
+                                ...diffPart('bin-entry', entryTitle, entryDiff.diff, entryDiff.error ? `No diff of ${entryName}: ${String(entryDiff.error)}` : `${entryName} is the same as at the last commit.`),
+                                ...(Array.isArray(entryDiff.hex) && entryDiff.hex.length
+                                  ? [
+                                      <Box key="bin-entry-hex" flexDirection="column">
+                                        {(entryDiff.hex as string[]).slice(0, 200).map((l, i) => (
+                                          <Text key={`ex${i}`} wrap={wrapMode} dimColor={l.startsWith('@@')} color={l.startsWith('-') ? 'diffRemoved' : l.startsWith('+') ? 'diffAdded' : undefined}>
+                                            {l}
+                                          </Text>
+                                        ))}
+                                      </Box>,
+                                    ]
+                                  : []),
+                              ]
+                            : []),
                         ]
                       : []),
                     ...diffPart('bin-strings', 'Readable text', r.text, 'The readable text is the same.'),
@@ -2752,7 +2853,7 @@ export const register: Register = on => {
             </Box>
           ) : null}
           {noteBlock(f.path)}
-          {bv.mode === 'diff' || (bv.mode === 'files' && zipFiles.length > 0 && zipFiles.length <= 300) ? null : Code ? <Code key={`bin:${bv.mode}`} source={body.slice(0, DRAW)} wrap={wrapMode} /> : <Text wrap={wrapMode}>{body.slice(0, DRAW)}</Text>}
+          {bv.mode === 'diff' || (bv.mode === 'files' && (zipShown.length > 0 || zipFind !== '')) ? null : Code ? <Code key={`bin:${bv.mode}`} source={body.slice(0, DRAW)} wrap={wrapMode} /> : <Text wrap={wrapMode}>{body.slice(0, DRAW)}</Text>}
         </Box>
       )
     }
@@ -2763,15 +2864,28 @@ export const register: Register = on => {
       const diffKey = `filediff:${f.path}`
       // ± Diff against: the last commit, the newest backup of this file, or the copy from before Claude's first edit
       const savedBase = await read($, diffBaseAtom)
-      const claudeBefore = (await read($, changesAtom)).find(c => c.path.toLowerCase() === f.path.toLowerCase())?.before
-      // this file's backups, newest first (any of them can be the base; the newest unless one was picked)
-      const fileBackups = (await read($, backupLogAtom)).filter(b => b.original.toLowerCase() === f.path.toLowerCase() && b.backup !== claudeBefore)
+      const change = (await read($, changesAtom)).find(c => c.path.toLowerCase() === f.path.toLowerCase())
+      const claudeBefore = change?.before
+      // Claude's change from one edit on: the copy before the first edit (all of them), then the one before each later
+      // edit (step i: from edit i + 1 on)
+      const claudeSteps = [
+        ...(claudeBefore !== undefined ? [{ at: 0, before: claudeBefore }] : []),
+        ...(change?.edits ?? []).filter(e => e.before !== claudeBefore),
+      ]
+      const claudeCopies = new Set(claudeSteps.map(s => s.before))
+      // this file's backups, newest first (any of them can be the base; the newest unless one was picked), without the
+      // copies made before Claude's edits (those are under "vs before Claude's edits")
+      const fileBackups = (await read($, backupLogAtom)).filter(b => b.original.toLowerCase() === f.path.toLowerCase() && !claudeCopies.has(b.backup))
       const ours = savedBase.path === f.path ? savedBase : undefined
       const pickedBackup = fileBackups.find(b => b.backup === ours?.backup) ?? fileBackups[0]
+      // two backups against each other: `versus` instead of the file now
+      const versusBackup = ours?.versus ? fileBackups.find(b => b.backup === ours.versus && b.backup !== pickedBackup?.backup) : undefined
+      const claudeStep = ours?.edit !== undefined && ours.edit < claudeSteps.length ? ours.edit : 0
       // another file: the one opened before this (open it, then this one, to compare the two)
       const otherFile = ours?.other ?? (await read($, recentAtom)).find(p => p.toLowerCase() !== f.path.toLowerCase())
       const base = ours && (ours.base !== 'backup' || pickedBackup) && (ours.base !== 'claude' || claudeBefore !== undefined) && (ours.base !== 'other' || otherFile) ? ours.base : 'commit'
-      const against = base === 'claude' ? claudeBefore : base === 'backup' ? pickedBackup?.backup : base === 'other' ? otherFile : undefined
+      const against = base === 'claude' ? claudeSteps[claudeStep]?.before : base === 'backup' ? pickedBackup?.backup : base === 'other' ? otherFile : undefined
+      const newer = base === 'backup' && versusBackup ? versusBackup.backup : f.path
       const setBase = (b: DiffBase['base'], more: Partial<DiffBase> = {}) =>
         update($, diffBaseAtom, () => ({ path: f.path, base: b, ...(b === 'other' ? { other: otherFile } : {}), ...more }))
       const runDiff = (args: string[]) =>
@@ -2784,27 +2898,29 @@ export const register: Register = on => {
         : base === 'commit'
           ? await runDiff([...wsArgs, 'HEAD', '--', f.path])
           : against
-            ? await runDiff(['--no-index', '--no-color', ...wsArgs, '--', against, f.path])
+            ? await runDiff(['--no-index', '--no-color', ...wsArgs, '--', against, newer])
             : ''
       const comparedWith =
         base === 'commit'
           ? 'the last commit'
           : base === 'backup'
-            ? `the backup from ${new Date(pickedBackup?.at ?? 0).toLocaleString()} (${String(against)})`
+            ? `the backup from ${new Date(pickedBackup?.at ?? 0).toLocaleString()} (${String(against)})${versusBackup ? `, against the backup from ${new Date(versusBackup.at).toLocaleString()} (${versusBackup.backup}) instead of the file now` : ''}`
             : base === 'other'
               ? `${String(against)} (the file opened before this one)`
               : against
-              ? `the file before Claude's first edit this session (${against})`
-              : "nothing: Claude made this file this session, so all of it is Claude's"
-      // Put back what Claude changed: the current version backed up first, then the copy from before its first edit
+                ? claudeStep > 0
+                  ? `the file before Claude's edit ${claudeStep + 1} of ${claudeSteps.length} this session (${against}): that edit and later ones`
+                  : `the file before Claude's first edit this session (${against})`
+                : "nothing: Claude made this file this session, so all of it is Claude's"
+      // Put back what Claude changed (from the picked edit on): the current version backed up first, then that copy
       const putBackClaude = async () => {
-        if (!claudeBefore) return
+        if (base !== 'claude' || !against) return
         const now = await backupOf(f.path)
         if (!now.ok) return say(`Not put back: couldn't copy the current version first (${String(now.error ?? 'unknown')}).`)
-        const r = await helper(['restore', claudeBefore, f.path])
+        const r = await helper(['restore', against, f.path])
         if (!r.ok) return say(`Not put back: ${String(r.error ?? 'unknown')}.`)
         await openPath(f.path)
-        await say(`Put back the file from before Claude's edits; the version it replaced is in ${String(now.backup)}.`)
+        await say(`Put back the file from before Claude's ${claudeStep > 0 ? `edit ${claudeStep + 1}` : 'edits'}; the version it replaced is in ${String(now.backup)}.`)
       }
       return (
         <Box flexDirection="column" gap={1}>
@@ -2863,16 +2979,38 @@ export const register: Register = on => {
               {pickedBackup ? <Button key="base-backup" label={fileBackups.length > 1 ? 'vs a backup' : 'vs its backup'} variant={base === 'backup' ? 'primary' : 'secondary'} onPress={() => void setBase('backup')} /> : null}
               {claudeBefore !== undefined ? <Button key="base-claude" label="vs before Claude's edits" variant={base === 'claude' ? 'primary' : 'secondary'} onPress={() => void setBase('claude')} /> : null}
               {otherFile ? <Button key="base-other" label={`vs ${otherFile.split(/[\\/]/).pop()}`} variant={base === 'other' ? 'primary' : 'secondary'} onPress={() => void setBase('other')} /> : null}
-              {base === 'claude' && claudeBefore ? <Button key="claude-putback" label="↩ Put back (undo Claude's edits)" onPress={() => void putBackClaude()} /> : null}
+              {base === 'claude' && against ? <Button key="claude-putback" label={claudeStep > 0 ? `↩ Put back (undo edit ${claudeStep + 1} and later)` : "↩ Put back (undo Claude's edits)"} onPress={() => void putBackClaude()} /> : null}
+            </Box>
+          ) : null}
+          {showDiff.includes(diffKey) && base === 'claude' && claudeSteps.length > 1 ? (
+            // Claude's change from one edit on (the newest 8 edits, and all of them)
+            <Box key="diff-edits" flexDirection="row" gap={1} flexWrap="wrap">
+              <Text dimColor>Claude's change:</Text>
+              {claudeSteps.map((s, i) =>
+                i === 0 || i >= claudeSteps.length - 8 ? (
+                  <Button key={`ce:${i}`} label={i === 0 ? `all ${claudeSteps.length} edits` : `from edit ${i + 1} · ${new Date(s.at).toLocaleTimeString()}`} variant={i === claudeStep ? 'primary' : 'secondary'} onPress={() => void setBase('claude', { edit: i })} />
+                ) : null,
+              )}
             </Box>
           ) : null}
           {showDiff.includes(diffKey) && base === 'backup' && fileBackups.length > 1 ? (
-            // which backup: the newest 8, by when they were made
-            <Box key="diff-backups" flexDirection="row" gap={1} flexWrap="wrap">
-              <Text dimColor>Backup from:</Text>
-              {fileBackups.slice(0, 8).map((b, i) => (
-                <Button key={`bk:${i}`} label={new Date(b.at).toLocaleString()} variant={b.backup === pickedBackup?.backup ? 'primary' : 'secondary'} onPress={() => void setBase('backup', { backup: b.backup })} />
-              ))}
+            // which backup: the newest 8, by when they were made; and against the file now or another backup
+            <Box key="diff-backups" flexDirection="column">
+              <Box key="diff-backup-pick" flexDirection="row" gap={1} flexWrap="wrap">
+                <Text dimColor>Backup from:</Text>
+                {fileBackups.slice(0, 8).map((b, i) => (
+                  <Button key={`bk:${i}`} label={new Date(b.at).toLocaleString()} variant={b.backup === pickedBackup?.backup ? 'primary' : 'secondary'} onPress={() => void setBase('backup', { backup: b.backup, ...(ours?.versus && ours.versus !== b.backup ? { versus: ours.versus } : {}) })} />
+                ))}
+              </Box>
+              <Box key="diff-backup-versus" flexDirection="row" gap={1} flexWrap="wrap">
+                <Text dimColor>Against:</Text>
+                <Button key="vs:now" label="the file now" variant={versusBackup ? 'secondary' : 'primary'} onPress={() => void setBase('backup', { backup: pickedBackup?.backup })} />
+                {fileBackups.slice(0, 8).map((b, i) =>
+                  b.backup === pickedBackup?.backup ? null : (
+                    <Button key={`vs:${i}`} label={new Date(b.at).toLocaleString()} variant={b.backup === versusBackup?.backup ? 'primary' : 'secondary'} onPress={() => void setBase('backup', { backup: pickedBackup?.backup, versus: b.backup })} />
+                  ),
+                )}
+              </Box>
             </Box>
           ) : null}
           {showDiff.includes(diffKey) ? sideToggle : null}

@@ -4,6 +4,13 @@ Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
 
+## 0.5.0 (not deployed yet)
+- A jar / zip's ± Diff: each added / removed / changed file is a button for its own diff (a class by javap, text as
+  text, anything else as readable text and hex), from the last commit's copy and the file now, nothing unpacked to disk.
+- 🗂 Files inside a zip of more than 300 files: a 🔎 box finds files by part of their name; each match opens.
+- Diffs: a backup against another backup (not only against the file now); Claude's change from one edit on (a copy is
+  made before each of Claude's Edit / Write calls, not only the first), with Put back for that edit and later.
+
 ## 0.4.0 (deployed 2026-11-03 17:30)
 - Binaries: 🗂 Files inside lists each file as a button (up to 300) that opens a copy of it (copied out to
   `file-pane-cache\zip`, CRC checked, read only); a zip / jar's ± Diff says which files inside were added, removed or
