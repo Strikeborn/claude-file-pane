@@ -3,6 +3,8 @@
 Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
+- A cached Heimdall render says "GPU" too (Strike saw "heimdall_probe" without it on the star, which was a GPU
+  render made earlier by hand); a plain fallback render is kept as `<key>-plain.png`.
 
 ## 0.3.1 (deployed 2026-11-03 15:51)
 - .glb / .gltf: Heimdall's GPU render (materials, textures); 0.3.0 used its plain grey render, so they looked bare.

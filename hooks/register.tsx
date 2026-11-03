@@ -480,8 +480,10 @@ try {
     else {
       const crypto = require('crypto');
       const key = (a[3] === 'bycontent' ? crypto.createHash('sha1').update('gpu|').update(fs.readFileSync(a[0])) : crypto.createHash('sha1').update('gpu|' + path.resolve(a[0]).toLowerCase() + '|' + st.size + '|' + st.mtimeMs)).digest('hex').slice(0, 32);
-      const dir = path.join(a[1], 'heimdall'), file = path.join(dir, key + '.png');
-      if (fs.existsSync(file)) out({ ok: true, file, cached: true });
+      // the GPU render is <key>.png, the plain one <key>-plain.png (so a cached one still says which it is)
+      const dir = path.join(a[1], 'heimdall'), file = path.join(dir, key + '.png'), plainFile = path.join(dir, key + '-plain.png');
+      if (fs.existsSync(file)) out({ ok: true, file, gpu: true, cached: true });
+      else if (fs.existsSync(plainFile)) out({ ok: true, file: plainFile, gpu: false, cached: true });
       else {
         fs.mkdirSync(dir, { recursive: true });
         const part = path.join(dir, key + '.part.png');
@@ -489,7 +491,7 @@ try {
         let r = run(['--gpu', a[0], part, '--size', '400', '--samples', '16']), gpu = r.status === 0 && fs.existsSync(part);
         if (!gpu) r = run([a[0], part, '--size', '400', '--budget', 'thumbnail']);
         if (r.status !== 0 || !fs.existsSync(part)) out({ error: "Heimdall3D couldn't render it: " + (String(r.stderr || r.stdout || r.error || 'no picture').trim().split(/\r?\n/)[0] || 'no picture') });
-        else { fs.renameSync(part, file); out({ ok: true, file, gpu }); }
+        else { fs.renameSync(part, gpu ? file : plainFile); out({ ok: true, file: gpu ? file : plainFile, gpu }); }
       }
     }
   } else if (cmd === 'bininfo') {
@@ -2410,7 +2412,7 @@ export const register: Register = on => {
         // drawn once per file version (a model's render or Explorer's thumbnail can take seconds): kept in memory for
         // redraws and on disk (file-pane-cache\previews) for other chats; the first time it draws in the background
         // while the rest of the pane shows
-        const k = `${HEIMDALL.test(f.path) ? 'probe2' : shell ? 'shell' : 'image'}|${f.path}|${f.size}|${f.mtimeMs}`
+        const k = `${HEIMDALL.test(f.path) ? 'probe3' : shell ? 'shell' : 'image'}|${f.path}|${f.size}|${f.mtimeMs}`
         const got = previews.get(k)
         if (got === undefined && !drawing.has(k)) {
           drawing.add(k)
