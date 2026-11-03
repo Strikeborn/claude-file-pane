@@ -4,6 +4,15 @@ Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
 
+## 0.4.0 (not deployed yet)
+- Binaries: 🗂 Files inside lists each file as a button (up to 300) that opens a copy of it (copied out to
+  `file-pane-cache\zip`, CRC checked, read only); a zip / jar's ± Diff says which files inside were added, removed or
+  changed; a class whose bytecode is the same shows what moved in its debug info (`javap -l`); a .NET DLL's ± Diff has
+  **C# diff (ILSpy)** (ILSpy on both copies, on a press).
+- Diffs: a text file against any of its backups (the newest 8 to pick from), or against the file opened before it
+  (open one, then the other).
+- A private GitHub copy of this repository (`Strikeborn/claude-file-pane`), for cloud agents.
+
 ## 0.3.2 (deployed 2026-11-03 16:10)
 - Model Organizer / ModKeeper integration dropped from the plans (Strike doesn't want it).
 - A cached Heimdall render says "GPU" too (Strike saw "heimdall_probe" without it on the star, which was a GPU

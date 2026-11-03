@@ -62,6 +62,8 @@ let appDirs: string[] | null = null
 let loadedStamp: { version: string; at: string } | null = null
 // a binary's info / readable text / hex page, by path|modified|mode|start (the helper's answers)
 const binCache = new Map<string, Record<string, unknown>>()
+// a DLL's C# diff (ILSpy on both copies), by path and modified time: made on a press, drawn after
+const csDiffs = new Map<string, Record<string, unknown>>()
 // a picture or model preview as the pane draws it (a small PNG / JPEG, base64), by kind|path|size|modified, and the
 // ones being drawn now (in the background: a model's render can take seconds)
 type Thumb = { w: number; h: number; tw: number; th: number; b64: string; mime?: string; via?: string }
@@ -401,14 +403,15 @@ const findJavap = (pf) => {
   }
   return null;
 };
-const javapOf = (exe, file) => {
-  const r = require('child_process').spawnSync(exe, ['-c', '-p', file], { encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 32 * 1024 * 1024 });
+const javapOf = (exe, file, flags) => {
+  const r = require('child_process').spawnSync(exe, [...(flags || ['-c', '-p']), file], { encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 32 * 1024 * 1024 });
   if (r.status !== 0) throw new Error('javap failed: ' + String(r.stderr || r.error || '').trim().split(/\r?\n/)[0]);
   // its file path, size and checksum lines differ between two copies of the same class: left out
   return r.stdout.split(/\r?\n/).filter(l => !/^\s*(Compiled from|Classfile |Last modified|SHA-256 checksum|MD5 checksum)/.test(l)).join('\n');
 };
-// a zip / jar's file list from its central directory (read only, nothing unpacked)
-const zipList = (file) => {
+// a zip / jar's entries from its central directory (read only, nothing unpacked): name, sizes, CRC, method, where
+// its data starts
+const zipEntries = (file) => {
   const size = fs.statSync(file).size, tail = readPart(file, Math.max(0, size - 65557), Math.min(size, 65557));
   let e = -1;
   for (let i = tail.length - 22; i >= 0; i--) if (tail.readUInt32LE(i) === 0x06054b50) { e = i; break; }
@@ -418,16 +421,77 @@ const zipList = (file) => {
   const cd = readPart(file, cdOff, Math.min(cdSize, size - cdOff)), entries = [];
   let bytes = 0;
   for (let o = 0; o + 46 <= cd.length && cd.readUInt32LE(o) === 0x02014b50 && entries.length < 20000; ) {
-    const time = cd.readUInt16LE(o + 12), date = cd.readUInt16LE(o + 14), usize = cd.readUInt32LE(o + 24);
-    const nlen = cd.readUInt16LE(o + 28), xlen = cd.readUInt16LE(o + 30), clen = cd.readUInt16LE(o + 32);
-    const name = cd.toString(cd.readUInt16LE(o + 8) & 0x800 ? 'utf8' : 'latin1', o + 46, o + 46 + nlen);
+    const flags = cd.readUInt16LE(o + 8), method = cd.readUInt16LE(o + 10), time = cd.readUInt16LE(o + 12), date = cd.readUInt16LE(o + 14);
+    const crc = cd.readUInt32LE(o + 16), csize = cd.readUInt32LE(o + 20), usize = cd.readUInt32LE(o + 24);
+    const nlen = cd.readUInt16LE(o + 28), xlen = cd.readUInt16LE(o + 30), clen = cd.readUInt16LE(o + 32), local = cd.readUInt32LE(o + 42);
+    const name = cd.toString(flags & 0x800 ? 'utf8' : 'latin1', o + 46, o + 46 + nlen);
     const two = (n) => String(n).padStart(2, '0');
     const when = ((date >> 9) + 1980) + '-' + two((date >> 5) & 15) + '-' + two(date & 31) + ' ' + two(time >> 11) + ':' + two((time >> 5) & 63);
     bytes += usize;
-    entries.push(String(usize).padStart(11, ' ') + '  ' + when + '  ' + name);
+    entries.push({ name, flags, method, crc, csize, usize, local, when });
     o += 46 + nlen + xlen + clen;
   }
-  return { count: total, bytes, lines: entries };
+  return { count: total, bytes, entries };
+};
+const zipList = (file) => {
+  const z = zipEntries(file);
+  return z.error ? z : { count: z.count, bytes: z.bytes, lines: z.entries.map(e => String(e.usize).padStart(11, ' ') + '  ' + e.when + '  ' + e.name), files: z.entries.slice(0, 301).map(e => ({ name: e.name, size: e.usize })) };
+};
+// two zips / jars file by file (by name, CRC and size): added +, removed -, changed ~
+const zipCompare = (fa, fb) => {
+  const x = zipEntries(fa), y = zipEntries(fb);
+  if (x.error || y.error) return null;
+  const old = new Map(x.entries.map(e => [e.name, e])), out = [];
+  for (const e of y.entries) {
+    const o = old.get(e.name);
+    if (!o) out.push('+ ' + e.name + '  (' + e.usize + ' bytes)');
+    else if (o.crc !== e.crc || o.usize !== e.usize) out.push('~ ' + e.name + '  (' + o.usize + ' → ' + e.usize + ' bytes)');
+    old.delete(e.name);
+  }
+  for (const o of old.values()) out.push('- ' + o.name + '  (' + o.usize + ' bytes)');
+  return out.sort((p, q) => p.slice(2).localeCompare(q.slice(2))).slice(0, 2000);
+};
+// one file out of a zip / jar, into <cache>\zip\<hash of the zip's version and the name>\<its name> (stored or
+// deflated only, 64 MB at most, its CRC checked); of the entry's name only its last part is used, cleaned
+const zipGet = (file, name, cache) => {
+  const z = zipEntries(file);
+  if (z.error) return z;
+  const e = z.entries.find(x => x.name === name);
+  if (!e || name.endsWith('/')) return { error: 'no such file in it' };
+  if (e.flags & 1) return { error: 'it is encrypted' };
+  if (e.method !== 0 && e.method !== 8) return { error: 'packed in a way not read here (method ' + e.method + ')' };
+  if (e.usize > 64 * 1024 * 1024) return { error: 'too big to copy out here (over 64 MB)' };
+  const zlib = require('zlib'), lh = readPart(file, e.local, 30);
+  if (lh.readUInt32LE(0) !== 0x04034b50) return { error: 'its entry is damaged' };
+  const raw = readPart(file, e.local + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28), e.csize);
+  const data = e.method === 0 ? raw : zlib.inflateRawSync(raw, { maxOutputLength: 64 * 1024 * 1024 });
+  if (typeof zlib.crc32 === 'function' && zlib.crc32(data) >>> 0 !== e.crc) return { error: 'its data is damaged (CRC differs)' };
+  const st = fs.statSync(file);
+  const dir = path.join(cache, 'zip', require('crypto').createHash('sha1').update(path.resolve(file).toLowerCase() + '|' + st.size + '|' + st.mtimeMs + '|' + name).digest('hex').slice(0, 16));
+  const dest = path.join(dir, (name.split(/[\\/]/).pop() || 'file').replace(/[^\w.-]/g, '_').replace(/^\.+/, '_'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(dest + '.part', data);
+  fs.renameSync(dest + '.part', dest);
+  return { ok: true, file: dest };
+};
+// ILSpy's C# for a .NET DLL (it reads the DLL; nothing in it runs), cached in <cache>\ilspy by SHA-256
+const ilspyOf = (file, cache) => {
+  const exe = path.join(process.env.USERPROFILE || '', '.dotnet', 'tools', 'ilspycmd.exe');
+  const buf = !fs.existsSync(exe) || fs.statSync(file).size > 64 * 1024 * 1024 ? null : fs.readFileSync(file);
+  const pe = buf && describePe(buf);
+  if (!fs.existsSync(exe)) return { error: "ILSpy isn't installed (dotnet tool install -g ilspycmd)" };
+  if (!buf) return { error: 'too big to decompile here (over 64 MB)' };
+  if (!pe || !pe.dotnet) return { error: 'not a .NET DLL (machine code: Info shows what it exports and imports)' };
+  const dir = path.join(cache, 'ilspy');
+  const cached = path.join(dir, require('crypto').createHash('sha256').update(buf).digest('hex').slice(0, 32) + '-' + path.basename(file).replace(/[^\w.-]/g, '_') + '.cs');
+  if (!fs.existsSync(cached)) {
+    const r = require('child_process').spawnSync(exe, [file], { windowsHide: true, timeout: 300000, maxBuffer: 256 * 1024 * 1024 });
+    if (r.status !== 0) return { error: 'ILSpy failed: ' + String(r.stderr || r.error || '').split('\n')[0] };
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(cached + '.part', r.stdout);
+    fs.renameSync(cached + '.part', cached);
+  }
+  return { ok: true, file: cached };
 };
 try {
   if (cmd === 'page') {
@@ -522,28 +586,15 @@ try {
     }
     out({ start, end: start + b.length, size, lines });
   } else if (cmd === 'ilspy') {
-    // ilspy <dll> <cache dir>: ILSpy's C# for a .NET DLL (it reads the DLL; nothing in it runs), cached by SHA-256
-    const exe = path.join(process.env.USERPROFILE || '', '.dotnet', 'tools', 'ilspycmd.exe');
-    const buf = !fs.existsSync(exe) || fs.statSync(a[0]).size > 64 * 1024 * 1024 ? null : fs.readFileSync(a[0]);
-    const pe = buf && describePe(buf);
-    if (!fs.existsSync(exe)) out({ error: "ILSpy isn't installed (dotnet tool install -g ilspycmd)" });
-    else if (!buf) out({ error: 'too big to decompile here (over 64 MB)' });
-    else if (!pe || !pe.dotnet) out({ error: 'not a .NET DLL (machine code: Info shows what it exports and imports)' });
-    else {
-      const dir = path.join(a[1], 'ilspy');
-      const cached = path.join(dir, require('crypto').createHash('sha256').update(buf).digest('hex').slice(0, 32) + '-' + path.basename(a[0]).replace(/[^\w.-]/g, '_') + '.cs');
-      let error = '';
-      if (!fs.existsSync(cached)) {
-        const r = require('child_process').spawnSync(exe, [a[0]], { windowsHide: true, timeout: 300000, maxBuffer: 256 * 1024 * 1024 });
-        if (r.status !== 0) error = 'ILSpy failed: ' + String(r.stderr || r.error || '').split('\n')[0];
-        else {
-          fs.mkdirSync(dir, { recursive: true });
-          fs.writeFileSync(cached + '.part', r.stdout);
-          fs.renameSync(cached + '.part', cached);
-        }
-      }
-      out(error ? { error } : { ok: true, file: cached });
-    }
+    out(ilspyOf(a[0], a[1]));
+  } else if (cmd === 'csdiff') {
+    // csdiff <old dll> <new dll> <cache dir>: ILSpy's C# of both copies (each cached by its SHA-256) as a unified diff
+    const x = ilspyOf(a[0], a[2]), y = x.error ? x : ilspyOf(a[1], a[2]);
+    if (x.error || y.error) out({ error: x.error || y.error });
+    else out({ diff: textDiff(a[2], fs.readFileSync(x.file, 'utf8'), fs.readFileSync(y.file, 'utf8')) });
+  } else if (cmd === 'zipget') {
+    // zipget <zip> <name> <cache dir>: one file out of a zip / jar into the cache, to open read only
+    out(zipGet(a[0], a[1], a[2]));
   } else if (cmd === 'bindiff') {
     // bindiff <old> <new> <cache dir>: two versions of a binary, as their readable text (a unified diff) and the hex
     // around where the bytes differ. 64 MiB each at most; read only.
@@ -552,7 +603,9 @@ try {
     else {
       const x = fs.readFileSync(a[0]), y = fs.readFileSync(a[1]);
       const same = x.equals(y);
-      out({ same, oldSize: sa, newSize: sb, text: same ? '' : textDiff(a[2], stringsOf(x).join('\n') + '\n', stringsOf(y).join('\n') + '\n'), hex: same ? [] : hexDiff(x, y) });
+      // two zips / jars: also which files inside changed
+      const zips = !same && magic(x).startsWith('zip') && magic(y).startsWith('zip') ? zipCompare(a[0], a[1]) : null;
+      out({ same, oldSize: sa, newSize: sb, files: zips, text: same ? '' : textDiff(a[2], stringsOf(x).join('\n') + '\n', stringsOf(y).join('\n') + '\n'), hex: same ? [] : hexDiff(x, y) });
     }
   } else if (cmd === 'javap') {
     // javap <class> <Program Files> [<old class> <cache dir>]: a Java class's bytecode (javap -c -p), or the diff of
@@ -560,7 +613,11 @@ try {
     const exe = findJavap(a[1]);
     if (!exe) out({ error: "no JDK's javap found under Program Files (Eclipse Adoptium, Java, Microsoft, Zulu, BellSoft)" });
     else if (fs.statSync(a[0]).size > 16 * 1024 * 1024) out({ error: 'too big for javap here (over 16 MB)' });
-    else if (a[2]) out({ diff: textDiff(a[3], javapOf(exe, a[2]) + '\n', javapOf(exe, a[0]) + '\n'), javap: exe });
+    else if (a[2]) {
+      // the same bytecode: what changed may be only debug info (line numbers, local names after a recompile): javap -l
+      const diff = textDiff(a[3], javapOf(exe, a[2]) + '\n', javapOf(exe, a[0]) + '\n');
+      out({ diff, debugDiff: diff.trim() ? '' : textDiff(a[3], javapOf(exe, a[2], ['-l', '-p']) + '\n', javapOf(exe, a[0], ['-l', '-p']) + '\n'), javap: exe });
+    }
     else out({ text: javapOf(exe, a[0]), javap: exe });
   } else if (cmd === 'pcache') {
     // pcache get|put <cache dir> <key>: a drawn preview (the pane's JSON, on stdin for put) kept in <cache>\previews,
@@ -2527,7 +2584,7 @@ export const register: Register = on => {
           const d = await helper(['bindiff', tmp, f.path, cacheDir])
           if (JAVA_CLASS.test(f.path) && !d.error && !d.same) {
             const j = await helper(['javap', f.path, programs, tmp, cacheDir])
-            return { ...d, javapDiff: j.diff, javapError: j.error }
+            return { ...d, javapDiff: j.diff, javapDebugDiff: j.debugDiff, javapError: j.error }
           }
           return d
         } finally {
@@ -2576,6 +2633,27 @@ export const register: Register = on => {
         await openPath(d.file)
         await say(`C# of ${f.path.slice(Math.max(f.path.lastIndexOf('\\'), f.path.lastIndexOf('/')) + 1)} by ILSpy (a cached copy: editing it changes nothing).`)
       }
+      // a file inside a zip / jar: copied out to the cache (read only there) and opened like any file
+      const openInZip = async (name: string) => {
+        const d = await helper(['zipget', f.path, name, cacheDir])
+        if (d.error || typeof d.file !== 'string') return say(`Couldn't open ${name}: ${String(d.error ?? 'nothing came out')}`)
+        await openPath(d.file)
+        await say(`${name} from ${f.path.slice(Math.max(f.path.lastIndexOf('\\'), f.path.lastIndexOf('/')) + 1)}: a copy in the cache (editing it changes nothing in the archive).`)
+      }
+      // a .NET DLL's C# against the last commit's: ILSpy on both copies (seconds to minutes, so only on a press)
+      const csKey = `${f.path}|${f.mtimeMs}`
+      const csDiff = csDiffs.get(csKey)
+      const diffCs = async () => {
+        await say('Decompiling both copies with ILSpy (kept after that)…')
+        const tmp = join(cacheDir, `last-commit-${Date.now()}${f.path.slice(f.path.lastIndexOf('.'))}`)
+        const g = await helper(['gitblob', f.path, tmp])
+        const d = g.ok ? await helper(['csdiff', tmp, f.path, cacheDir]) : { error: 'not in git at the last commit' }
+        if (g.ok) void helper(['rmtemp', cacheDir, tmp])
+        csDiffs.set(csKey, d)
+        if (csDiffs.size > 10) csDiffs.delete(csDiffs.keys().next().value!)
+        await say(d.error ? `No C# diff: ${String(d.error)}` : 'C# diff ready (below the bytecode parts).')
+      }
+      const zipFiles = Array.isArray(r.files) ? (r.files as { name: string; size: number }[]) : []
       return (
         <Box flexDirection="column" gap={1}>
           {header}
@@ -2596,13 +2674,26 @@ export const register: Register = on => {
             {JAVA_CLASS.test(f.path) ? <Button key="bin-java" label="☕ Bytecode (javap)" variant={bv.mode === 'java' ? 'primary' : 'secondary'} onPress={() => void setBv({ mode: 'java', at: 0 })} /> : null}
             <Button key="bin-diff" label="± Diff" variant={bv.mode === 'diff' ? 'primary' : 'secondary'} onPress={() => void setBv({ mode: 'diff', at: 0 })} />
             {bv.mode === 'diff' ? sideToggle : null}
-            {bv.mode === 'info' && r.dotnet ? <Button key="bin-cs" label="C# (ILSpy)" onPress={() => void decompile()} /> : null}
+            {bv.mode === 'diff' && /\.(dll|exe)$/i.test(f.path) && !r.error && !r.same ? <Button key="bin-csdiff" label="C# diff (ILSpy)" variant={csDiff ? 'primary' : 'secondary'} onPress={() => void diffCs()} /> : null}
+            {bv.mode === 'info' && r.dotnet ?<Button key="bin-cs" label="C# (ILSpy)" onPress={() => void decompile()} /> : null}
           </Box>
           {r.error ? <Text wrap={wrapMode} color="error">{bv.mode === 'diff' ? `No diff: ${String(r.error)}` : `Couldn't read it: ${String(r.error)}`}</Text> : null}
           {bv.mode === 'files' && !r.error ? (
             <Text wrap={wrapMode} dimColor>
-              {`${Number(r.count ?? lines.length).toLocaleString('en-US')} entries, ${sizeText(Number(r.bytes ?? 0))} unpacked${lines.length >= 20000 ? ' · first 20,000 shown' : ''} · read from its directory, nothing unpacked`}
+              {`${Number(r.count ?? lines.length).toLocaleString('en-US')} entries, ${sizeText(Number(r.bytes ?? 0))} unpacked${lines.length >= 20000 ? ' · first 20,000 shown' : ''} · read from its directory, nothing unpacked${zipFiles.length > 0 && zipFiles.length <= 300 ? ' · press one to open a copy of it' : ''}`}
             </Text>
+          ) : null}
+          {bv.mode === 'files' && !r.error && zipFiles.length > 0 && zipFiles.length <= 300 ? (
+            // up to 300 files: each a button that opens a copy of it (more: the list as text, below)
+            <Box key="zip-files" flexDirection="column">
+              {zipFiles.map((z, i) =>
+                z.name.endsWith('/') ? (
+                  <Text key={`zd${i}`} dimColor wrap={wrapMode}>{`📁 ${z.name}`}</Text>
+                ) : (
+                  <Button key={`zf:${i}`} label={`📄 ${z.name} · ${sizeText(z.size)}`} plain onPress={() => void openInZip(z.name)} />
+                ),
+              )}
+            </Box>
           ) : null}
           {bv.mode === 'java' && typeof r.javap === 'string' ? <Text wrap={wrapMode} dimColor>{`by ${r.javap} (javap -c -p)`}</Text> : null}
           {bv.mode === 'diff' && !r.error ? (
@@ -2614,6 +2705,28 @@ export const register: Register = on => {
                 ? null
                 : [
                     ...(JAVA_CLASS.test(f.path) ? diffPart('bin-javap', 'Bytecode (javap -c -p)', r.javapDiff, r.javapError ? `No bytecode diff: ${String(r.javapError)}` : 'The bytecode is the same (only debug info or the constant pool changed).') : []),
+                    // the same bytecode: the line numbers and local names (a recompile moves them)
+                    ...(JAVA_CLASS.test(f.path) && typeof r.javapDebugDiff === 'string' && r.javapDebugDiff.trim() ? diffPart('bin-javap-l', 'Debug info (javap -l: line numbers, local variable names)', r.javapDebugDiff, '') : []),
+                    ...(csDiff ? diffPart('bin-csd', 'C# (ILSpy on both copies)', csDiff.diff, csDiff.error ? `No C# diff: ${String(csDiff.error)}` : 'The C# is the same.') : []),
+                    // a zip / jar: which files inside were added, removed or changed
+                    ...(Array.isArray(r.files)
+                      ? [
+                          <Text key="h:bin-zipfiles" bold>
+                            Files inside
+                          </Text>,
+                          <Box key="bin-zipfiles" flexDirection="column">
+                            {(r.files as string[]).length === 0 ? (
+                              <Text key="z-same" dimColor wrap={wrapMode}>The same files (only how they're packed changed).</Text>
+                            ) : (
+                              (r.files as string[]).slice(0, 400).map((l, i) => (
+                                <Text key={`zc${i}`} wrap={wrapMode} color={l.startsWith('-') ? 'diffRemoved' : l.startsWith('+') ? 'diffAdded' : 'warning'}>
+                                  {l}
+                                </Text>
+                              ))
+                            )}
+                          </Box>,
+                        ]
+                      : []),
                     ...diffPart('bin-strings', 'Readable text', r.text, 'The readable text is the same.'),
                     <Text key="h:bin-hexdiff" bold>
                       Bytes (hex)
@@ -2639,7 +2752,7 @@ export const register: Register = on => {
             </Box>
           ) : null}
           {noteBlock(f.path)}
-          {bv.mode === 'diff' ? null : Code ? <Code key={`bin:${bv.mode}`} source={body.slice(0, DRAW)} wrap={wrapMode} /> : <Text wrap={wrapMode}>{body.slice(0, DRAW)}</Text>}
+          {bv.mode === 'diff' || (bv.mode === 'files' && zipFiles.length > 0 && zipFiles.length <= 300) ? null : Code ? <Code key={`bin:${bv.mode}`} source={body.slice(0, DRAW)} wrap={wrapMode} /> : <Text wrap={wrapMode}>{body.slice(0, DRAW)}</Text>}
         </Box>
       )
     }
@@ -2651,10 +2764,16 @@ export const register: Register = on => {
       // ± Diff against: the last commit, the newest backup of this file, or the copy from before Claude's first edit
       const savedBase = await read($, diffBaseAtom)
       const claudeBefore = (await read($, changesAtom)).find(c => c.path.toLowerCase() === f.path.toLowerCase())?.before
-      const newestBackup = (await read($, backupLogAtom)).find(b => b.original.toLowerCase() === f.path.toLowerCase() && b.backup !== claudeBefore)
-      const base = savedBase.path === f.path && (savedBase.base !== 'backup' || newestBackup) && (savedBase.base !== 'claude' || claudeBefore !== undefined) ? savedBase.base : 'commit'
-      const against = base === 'claude' ? claudeBefore : base === 'backup' ? newestBackup?.backup : undefined
-      const setBase = (b: DiffBase['base']) => update($, diffBaseAtom, () => ({ path: f.path, base: b }))
+      // this file's backups, newest first (any of them can be the base; the newest unless one was picked)
+      const fileBackups = (await read($, backupLogAtom)).filter(b => b.original.toLowerCase() === f.path.toLowerCase() && b.backup !== claudeBefore)
+      const ours = savedBase.path === f.path ? savedBase : undefined
+      const pickedBackup = fileBackups.find(b => b.backup === ours?.backup) ?? fileBackups[0]
+      // another file: the one opened before this (open it, then this one, to compare the two)
+      const otherFile = ours?.other ?? (await read($, recentAtom)).find(p => p.toLowerCase() !== f.path.toLowerCase())
+      const base = ours && (ours.base !== 'backup' || pickedBackup) && (ours.base !== 'claude' || claudeBefore !== undefined) && (ours.base !== 'other' || otherFile) ? ours.base : 'commit'
+      const against = base === 'claude' ? claudeBefore : base === 'backup' ? pickedBackup?.backup : base === 'other' ? otherFile : undefined
+      const setBase = (b: DiffBase['base'], more: Partial<DiffBase> = {}) =>
+        update($, diffBaseAtom, () => ({ path: f.path, base: b, ...(b === 'other' ? { other: otherFile } : {}), ...more }))
       const runDiff = (args: string[]) =>
         $.process
           .run(['git', '-c', 'core.quotepath=false', 'diff', ...args], { cwd: parent(f.path), timeoutMs: 20_000 })
@@ -2671,8 +2790,10 @@ export const register: Register = on => {
         base === 'commit'
           ? 'the last commit'
           : base === 'backup'
-            ? `the backup from ${new Date(newestBackup?.at ?? 0).toLocaleTimeString()} (${String(against)})`
-            : against
+            ? `the backup from ${new Date(pickedBackup?.at ?? 0).toLocaleString()} (${String(against)})`
+            : base === 'other'
+              ? `${String(against)} (the file opened before this one)`
+              : against
               ? `the file before Claude's first edit this session (${against})`
               : "nothing: Claude made this file this session, so all of it is Claude's"
       // Put back what Claude changed: the current version backed up first, then the copy from before its first edit
@@ -2739,9 +2860,19 @@ export const register: Register = on => {
           {showDiff.includes(diffKey) ? (
             <Box key="diff-against" flexDirection="row" gap={1} flexWrap="wrap">
               <Button key="base-commit" label="vs last commit" variant={base === 'commit' ? 'primary' : 'secondary'} onPress={() => void setBase('commit')} />
-              {newestBackup ? <Button key="base-backup" label="vs newest backup" variant={base === 'backup' ? 'primary' : 'secondary'} onPress={() => void setBase('backup')} /> : null}
+              {pickedBackup ? <Button key="base-backup" label={fileBackups.length > 1 ? 'vs a backup' : 'vs its backup'} variant={base === 'backup' ? 'primary' : 'secondary'} onPress={() => void setBase('backup')} /> : null}
               {claudeBefore !== undefined ? <Button key="base-claude" label="vs before Claude's edits" variant={base === 'claude' ? 'primary' : 'secondary'} onPress={() => void setBase('claude')} /> : null}
+              {otherFile ? <Button key="base-other" label={`vs ${otherFile.split(/[\\/]/).pop()}`} variant={base === 'other' ? 'primary' : 'secondary'} onPress={() => void setBase('other')} /> : null}
               {base === 'claude' && claudeBefore ? <Button key="claude-putback" label="↩ Put back (undo Claude's edits)" onPress={() => void putBackClaude()} /> : null}
+            </Box>
+          ) : null}
+          {showDiff.includes(diffKey) && base === 'backup' && fileBackups.length > 1 ? (
+            // which backup: the newest 8, by when they were made
+            <Box key="diff-backups" flexDirection="row" gap={1} flexWrap="wrap">
+              <Text dimColor>Backup from:</Text>
+              {fileBackups.slice(0, 8).map((b, i) => (
+                <Button key={`bk:${i}`} label={new Date(b.at).toLocaleString()} variant={b.backup === pickedBackup?.backup ? 'primary' : 'secondary'} onPress={() => void setBase('backup', { backup: b.backup })} />
+              ))}
             </Box>
           ) : null}
           {showDiff.includes(diffKey) ? sideToggle : null}

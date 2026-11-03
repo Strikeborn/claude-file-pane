@@ -270,6 +270,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
             { name: 'ship.obj', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'Fish.dll', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'Fish.class', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
+            { name: 'Old.class', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'mods.jar', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
           ] : [],
   }))
@@ -303,10 +304,14 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
       if (cmd === 'strings') return out(JSON.stringify({ start: 0, end: 100, size: 100, lines: ['00000040  Fish.Patches.HaulFix'] }))
       if (cmd === 'hex') return out(JSON.stringify({ start: 0, end: 100, size: 100, lines: ['00000000  4d 5a 90 00  MZ..'] }))
       if (cmd === 'ilspy') return out(JSON.stringify({ ok: true, file: 'C:\\Users\\tester\\.claude\\file-pane-cache\\ilspy\\abc-Fish.dll.cs' }))
-      if (cmd === 'ziplist') return out(JSON.stringify({ count: 2, bytes: 361, lines: ['         64  2026-11-03 14:47  META-INF/MANIFEST.MF', '        297  2026-11-03 14:47  Fish.class'] }))
-      // javap: the bytecode, or (with an older copy) its diff
-      if (cmd === 'javap') return out(JSON.stringify(e.argv.length > 6 ? { diff: '@@ -9 +9 @@ int haul();\n-       0: iconst_1\n+       0: iconst_2\n' } : { text: 'public class Fish {\n  int haul();\n}\n', javap: 'C:\\Program Files\\Java\\jdk-21\\bin\\javap.exe' }))
-      if (cmd === 'bindiff') return out(JSON.stringify({ same: false, oldSize: 235, newSize: 297, text: '@@ -1 +1 @@\n-HaulOld\n+HaulNew\n', hex: ['@@ 62 bytes added at 0x9; everything after is the same, just moved @@', '+00000009  12 0a  ..'] }))
+      if (cmd === 'ziplist') return out(JSON.stringify({ count: 2, bytes: 361, lines: ['         64  2026-11-03 14:47  META-INF/MANIFEST.MF', '        297  2026-11-03 14:47  Fish.class'], files: [{ name: 'META-INF/', size: 0 }, { name: 'META-INF/MANIFEST.MF', size: 64 }, { name: 'Fish.class', size: 297 }] }))
+      // a file out of the jar (copied to the cache), and a DLL's C# diff (ILSpy on both copies)
+      if (cmd === 'zipget') return out(JSON.stringify({ ok: true, file: 'C:\\Users\\tester\\.claude\\file-pane-cache\\zip\\ab12\\Fish.class' }))
+      if (cmd === 'csdiff') return out(JSON.stringify({ diff: '@@ -1 +1 @@\n-  public int Haul() => 1;\n+  public int Haul() => 2;\n' }))
+      // javap: the bytecode, or (with an older copy) its diff; Old.class only moved lines (debug info)
+      if (cmd === 'javap' && e.argv.length > 6 && /Old\.class$/.test(String(e.argv[4]))) return out(JSON.stringify({ diff: '', debugDiff: '@@ -5 +5 @@ int haul();\n-      line 1: 0\n+      line 4: 0\n' }))
+      if (cmd === 'javap') return out(JSON.stringify(e.argv.length > 6 ?{ diff: '@@ -9 +9 @@ int haul();\n-       0: iconst_1\n+       0: iconst_2\n' } : { text: 'public class Fish {\n  int haul();\n}\n', javap: 'C:\\Program Files\\Java\\jdk-21\\bin\\javap.exe' }))
+      if (cmd === 'bindiff') return out(JSON.stringify({ same: false, oldSize: 235, newSize: 297, files: /\.jar$/.test(String(e.argv[5])) ? ['~ Fish.class  (235 → 297 bytes)', '+ notes.txt  (6 bytes)'] : null, text:'@@ -1 +1 @@\n-HaulOld\n+HaulNew\n', hex: ['@@ 62 bytes added at 0x9; everything after is the same, just moved @@', '+00000009  12 0a  ..'] }))
       // Heimdall3D's probe: renders boat.glb into the cache; car.glb fails (so Explorer's thumbnail is asked)
       if (cmd === 'probe') return out(JSON.stringify(/car\.glb$/.test(String(e.argv[4])) ? { error: "Heimdall3D couldn't render it: bad file" } : { ok: true, gpu: true, file: 'C:\\Users\\tester\\.claude\\file-pane-cache\\heimdall\\abc.png' }))
       // the preview cache: ship.obj's preview was drawn in an earlier chat; the rest are drawn now and kept
@@ -419,9 +424,19 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   await ui.press({ key: 'e:mods.jar' })
   await ui.press({ key: 'bin-files' })
   expect(await shows(/^2 entries, .* unpacked/)).toBeDefined()
-  expect(await shows(/297 {2}2026-11-03 14:47 {2}Fish\.class/)).toBeDefined()
+  // each file a button (a folder isn't): it's copied out to the cache and opened from there
+  expect((await ui.find({ key: 'zf:2' }))?.text).toBe('📄 Fish.class · 297 B')
+  expect(await ui.find({ key: 'zf:0' })).toBeUndefined()
+  await ui.press({ key: 'zf:2' })
+  expect(await shows(/Fish\.class from mods\.jar: a copy in the cache/)).toBeDefined()
+  expect(runs.find(r => r.argv[3] === 'zipget')!.argv.slice(4)).toEqual([`${DIR}\\mods.jar`, 'Fish.class', 'C:\\Users\\tester\\.claude\\file-pane-cache'])
+  await ui.press({ key: 'back' })
+  await ui.press({ key: `rec:${DIR}\\mods.jar` })
   await ui.press({ key: 'bin-diff' })
   expect(await shows(/Last commit 235 B → now 297 B/)).toBeDefined()
+  // which files inside changed
+  expect(await shows(/^~ Fish\.class {2}\(235 → 297 bytes\)$/)).toBeDefined()
+  expect(await shows(/^\+ notes\.txt/)).toBeDefined()
   expect(await shows(/HaulNew/)).toBeDefined()
   expect(await shows(/62 bytes added at 0x9/)).toBeDefined()
   await ui.press({ key: 'side' })
@@ -444,6 +459,13 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   expect(javapDiff.argv[4]).toBe(`${DIR}\\Fish.class`)
   expect(String(javapDiff.argv[6])).toMatch(/last-commit-\d+\.class$/)
 
+  // a class whose bytecode is the same: what moved in its debug info (javap -l)
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'e:Old.class' })
+  await ui.press({ key: 'bin-diff' })
+  expect(await shows(/^Debug info \(javap -l/)).toBeDefined()
+  expect(await shows(/line 4: 0/)).toBeDefined()
+
   // a DLL: what it is (PE info), its readable text, its bytes, and C# through ILSpy (opened as a file)
   await ui.press({ key: 'back' })
   await ui.press({ key: 'e:Fish.dll' })
@@ -456,6 +478,14 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   await ui.press({ key: 'wrap' })
   expect(await shows(/4d 5a 90 00/)).toBeDefined()
   await ui.press({ key: 'wrap' })
+  // its C# against the last commit's: ILSpy on both copies, on a press
+  await ui.press({ key: 'bin-diff' })
+  await ui.press({ key: 'bin-csdiff' })
+  await until(() => runs.some(r => r.argv[3] === 'csdiff'), 'the C# diff')
+  expect(await shows(/Haul\(\) => 2/)).toBeDefined()
+  const csd = runs.find(r => r.argv[3] === 'csdiff')!
+  expect(String(csd.argv[4])).toMatch(/file-pane-cache\\last-commit-\d+\.dll$/)
+  expect(csd.argv.slice(5)).toEqual([`${DIR}\\Fish.dll`, 'C:\\Users\\tester\\.claude\\file-pane-cache'])
   await ui.press({ key: 'bin-info' })
   await ui.press({ key: 'bin-cs' })
   expect(await shows(/C# of Fish\.dll by ILSpy/)).toBeDefined()
@@ -480,11 +510,14 @@ test('diffs: Claude\'s change, vs backup / commit, ignore spaces, word highlight
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: DIR }))
   on('env.get', () => ({ value: 'C:\\Users\\tester' }))
-  on('fs.list', (_, e) => ({ value: String(e.path ?? '') === DIR ? [{ name: 'app.ts', kind: 'file', size: 20, mtimeMs: 1, isLink: false }] : [] }))
+  on('fs.list', (_, e) => ({
+    value: String(e.path ?? '') === DIR ? [{ name: 'app.ts', kind: 'file', size: 20, mtimeMs: 1, isLink: false }, { name: 'notes.ts', kind: 'file', size: 20, mtimeMs: 1, isLink: false }] : [],
+  }))
   on('fs.exists', () => ({ value: false }))
   on('fs.stat', (_, e) => ({ value: /\.ts$/i.test(String(e.path)) ? { kind: 'file', size: 20, mtimeMs: 1, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }))
   on('fs.read', (_, e) => {
     if (String(e.path) === FILE) return { value: 'const speed = 2\n' }
+    if (String(e.path) === `${DIR}\\notes.ts`) return { value: 'const speed = 3\n' }
     throw new Error('ENOENT')
   })
   on('store.get', () => ({ value: undefined }))
@@ -493,7 +526,8 @@ test('diffs: Claude\'s change, vs backup / commit, ignore spaces, word highlight
     runs.push(e.argv)
     const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     const [exe, , , cmd] = e.argv
-    if (exe === 'node' && cmd === 'backup') return out(JSON.stringify({ ok: true, backup: runs.filter(r => r[3] === 'backup').length === 1 ? BEFORE : 'C:\\Users\\tester\\.claude\\file-pane-backups\\now-app.ts' }))
+    const n = runs.filter(r => r[3] === 'backup').length
+    if (exe === 'node' && cmd === 'backup') return out(JSON.stringify({ ok: true, backup: n === 1 ? BEFORE : `C:\\Users\\tester\\.claude\\file-pane-backups\\now${n}-app.ts` }))
     if (exe === 'node' && cmd === 'restore') return out('{"ok":true}')
     if (exe === 'git' && e.argv.includes('diff')) return out('@@ -1 +1 @@\n-const speed = 1\n+const speed = 2\n', e.argv.includes('--no-index') ? 1 : 0)
     return out('', 128)
@@ -550,5 +584,27 @@ test('diffs: Claude\'s change, vs backup / commit, ignore spaces, word highlight
   // the current version's copy is now the newest backup: vs newest backup compares with it
   await ui.press({ key: 'base-backup' })
   expect(await shows(/Compared with the backup from/)).toBeDefined()
+  expect(await ui.find({ key: 'bk:0' })).toBeUndefined()
+
+  // with two backups, any of them: the older one picked compares with it
+  await ui.press({ key: 'base-claude' })
+  await ui.press({ key: 'claude-putback' })
+  for (let i = 0; i < 20 && runs.filter(r => r[3] === 'backup').length < 3; i++) await ui.drawn()
+  await ui.press({ key: 'base-backup' })
+  for (let i = 0; i < 20 && !(await ui.find({ key: 'bk:1' })); i++) await ui.drawn()
+  await ui.press({ key: 'bk:1' })
+  for (let i = 0; i < 20 && !lastDiff().some(a => /now2-app\.ts$/.test(a)); i++) await ui.drawn()
+  expect(lastDiff().slice(-3)).toEqual(['--', 'C:\\Users\\tester\\.claude\\file-pane-backups\\now2-app.ts', FILE])
+
+  // vs another file: the one opened before this one
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'e:notes.ts' })
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'e:app.ts' })
+  expect((await ui.find({ key: 'base-other' }))?.text).toBe('vs notes.ts')
+  await ui.press({ key: 'base-other' })
+  expect(await shows(/Compared with F:\\proj\\notes\.ts \(the file opened before this one\)/)).toBeDefined()
+  for (let i = 0; i < 20 && lastDiff().at(-2) !== `${DIR}\\notes.ts`; i++) await ui.drawn()
+  expect(lastDiff().slice(-3)).toEqual(['--', `${DIR}\\notes.ts`, FILE])
   await ui.unmount()
 })

@@ -3,7 +3,7 @@
 A pane beside the Claude Code chat for browsing folders, reading and editing files, and keeping an eye on the project
 the chat is working in. It's a Claude Code mod (hooks module), not an MCP server or an app.
 
-Plugin name: `file-pane` · version 0.3.2 · open it with `/files` (or Claude can open it on a file with the
+Plugin name: `file-pane` · version 0.4.0 · open it with `/files` (or Claude can open it on a file with the
 `mcp__file-pane__open` tool; `mcp__file-pane__ticks` lists the checkboxes ticked through it).
 
 ## What it does
@@ -24,11 +24,14 @@ Plugin name: `file-pane` · version 0.3.2 · open it with `/files` (or Claude ca
     tool install -g ilspycmd`), kept in `~/.claude/file-pane-cache/ilspy` by the DLL's SHA-256, and opened like a
     file (paging, Search, Wrap).
   - **🗂 Files inside** a zip / jar (and .apk, .nupkg, .vsix, .docx…): size, date and name of each entry, read from
-    the zip's own directory (nothing unpacked; zip64 archives aren't listed).
+    the zip's own directory (zip64 archives aren't listed). Up to 300 files, each is a button that opens a copy of it
+    (copied out to `~/.claude/file-pane-cache/zip`, its CRC checked; editing the copy changes nothing in the archive).
   - **☕ Bytecode (javap)** for a Java `.class`: `javap -c -p` from a JDK under Program Files.
   - **± Diff** against the last commit, as ModKeeper's update review does it: the readable text old vs new, the hex
-    around where the bytes differ (one inserted / removed block is shown as such, not every later line changed), and
-    for a `.class` the bytecode diff (javap on both copies).
+    around where the bytes differ (one inserted / removed block is shown as such, not every later line changed), for a
+    `.class` the bytecode diff (javap on both copies; when the bytecode is the same, what moved in its debug info:
+    `javap -l` line numbers and local names), for a zip / jar which files inside were added, removed or changed, and
+    for a .NET DLL **C# diff (ILSpy)** on a press (ILSpy on both copies, each cached).
 - Pictures are drawn as SVG through Windows imaging (the desktop pane has no Image).
 - 3D models and other files Explorer can preview (.fbx .obj .stl .3mf .ply .dae .glb .gltf .blend .exr .hdr .dds
   .tga .tif .psd .webp .heic) show Explorer's own thumbnail, made by whatever is installed for that type (Heimdall3D,
@@ -48,7 +51,8 @@ Plugin name: `file-pane` · version 0.3.2 · open it with `/files` (or Claude ca
   ✎ Edit turns Wrap back on. Markdown documents always wrap (the engine's Markdown has no setting either).
 - ± Diff of a file, one column or ⇆ side by side (there, the words that changed inside a line are highlighted), with
   **␣ Ignore spaces** (spaces, tabs, line endings, blank lines). A text file compares with **the last commit**, its
-  **newest backup**, or **the file before Claude's edits**: before Claude's first Edit / Write of a file in a session
+  **backups** (the newest, or any of the newest 8), **the file opened before it** (open one, then the other, and
+  press "vs <name>"), or **the file before Claude's edits**: before Claude's first Edit / Write of a file in a session
   the pane copies it to the backups folder, so Changes has **± Claude's change** per file and **↩ Put back** undoes
   Claude's edits (the current version backed up first). A picture's last-commit copy is a temp file in
   `~/.claude/file-pane-cache`, removed after drawing.
@@ -94,7 +98,7 @@ Plugin name: `file-pane` · version 0.3.2 · open it with `/files` (or Claude ca
 | `hooks/register.tsx` | the whole mod: hooks, the pane, the band, the `/files` command, the `open` tool, the Node helper |
 | `hooks/project.tsx` | pure parsers: markdown sections and tasks, heading paths, several-boxes lines and their split, side-by-side diff, commits, releases, features, building blocks |
 | `types/index.d.ts` | the mod's `$.state` contract (`file-pane.*` keys) and its value types |
-| `tests/pane.test.tsx` | checklists (counts, a tick logged and undone, the ticks tool, Only open, Edit mode, Split, Done dates, the Ticks tab) and the version line; presses every project tab and opens a file and a .md, in a non-git folder; flips ↩ Wrap through every view and draws a side-by-side diff both ways; opens a DLL in Info, Readable text, Hex and C# (ILSpy), a jar's file list and diff, a class's javap and bytecode diff; checks that VS Code and the temp-file removal run without cmd.exe, that a model previews through the shell thumbnail (and a refused thumbnail maker says why), and a .glb through Heimdall's probe; Claude's change (copy before its Edit, ± Claude's change, Put back), vs backup / commit, Ignore spaces, word highlights |
+| `tests/pane.test.tsx` | checklists (counts, a tick logged and undone, the ticks tool, Only open, Edit mode, Split, Done dates, the Ticks tab) and the version line; presses every project tab and opens a file and a .md, in a non-git folder; flips ↩ Wrap through every view and draws a side-by-side diff both ways; opens a DLL in Info, Readable text, Hex and C# (ILSpy), a jar's file list (a file opened from it), its diff (which files changed), a class's javap and bytecode diff (and the debug-info diff when the bytecode is the same), a DLL's C# diff; checks that VS Code and the temp-file removal run without cmd.exe, that a model previews through the shell thumbnail (and a refused thumbnail maker says why), and a .glb through Heimdall's probe; Claude's change (copy before its Edit, ± Claude's change, Put back), vs backup (any of them) / commit / the file opened before, Ignore spaces, word highlights |
 | `CHANGELOG.md` | what changed, by version |
 | `samples/make-test-glb.mjs` → `samples/star-test.glb` | a test model for previews: a yellow star (material color), a red / blue checker plate (an embedded PNG texture) and a green cube |
 | `tsconfig.json` | extends `.claude-plugin/types/tsconfig.json` (written by the engine when it loads the mod) |

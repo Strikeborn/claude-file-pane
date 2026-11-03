@@ -34,8 +34,11 @@ export type Change = {
   /** A backup of the file from before Claude's first edit of it this session ('' when the file was new). */
   before?: string;
 };
-/** What a text file's ± Diff compares it with: the last commit, its newest backup, or before Claude's edits. */
-export type DiffBase = { path: string; base: 'commit' | 'backup' | 'claude' };
+/**
+ * What a text file's ± Diff compares it with: the last commit, one of its backups (`backup`, else the newest), before
+ * Claude's edits, or another file (`other`: the one opened before it).
+ */
+export type DiffBase = { path: string; base: 'commit' | 'backup' | 'claude' | 'other'; backup?: string; other?: string };
 /** The last run of a project script (Checks). */
 export type CheckResult = { ok: boolean; at: number; secs: number; summary: string; failures: string[]; tail: string };
 
