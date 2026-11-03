@@ -80,6 +80,8 @@ declare module 'claude-code' {
       logErrorsOnly: boolean;
       /** Diffs drawn as two columns (before | after) instead of one. */
       sideBySide: boolean;
+      /** 🔍 Closer on model previews: 1, 1.5 or 2 (the middle of the picture, drawn at the same size). */
+      previewZoom: number;
       /** Ticks tab: every folder's ticks (true), or only this project's. */
       ticksAll: boolean;
       /** Diffs leave out changes in spaces, tabs, line endings and blank lines. */

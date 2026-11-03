@@ -4,6 +4,13 @@ Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
 
+## 0.3.1 (2026-11-03, not deployed yet)
+- .glb / .gltf: Heimdall's GPU render (materials, textures); 0.3.0 used its plain grey render, so they looked bare.
+- Previews drawn once per file version, in the background, kept in memory and on disk (`file-pane-cache\previews`):
+  Explorer's thumbnail took ~6 s on every open and every redraw before. Detailed ones go as JPEG (no more retrying
+  at smaller sizes). 🔍 Closer zooms a model preview.
+- `samples/star-test.glb` (and its maker script) to check previews: colors, a texture, several materials.
+
 ## 0.3.0 (deployed 2026-11-03 15:18)
 - .glb / .gltf previews drawn by Heimdall3D's `heimdall_probe` (from Program Files), cached; Explorer's thumbnail when
   it can't.

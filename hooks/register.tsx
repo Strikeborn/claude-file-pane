@@ -41,7 +41,8 @@ const backupLogAtom = atom({ plugin: 'file-pane', key: 'backupLog' } as const, [
 const searchAtom = atom({ plugin: 'file-pane', key: 'search' } as const, '')
 const logErrorsAtom = atom({ plugin: 'file-pane', key: 'logErrorsOnly' } as const, false)
 const sideAtom = atom({ plugin: 'file-pane', key: 'sideBySide' } as const, false)
-const ticksAllAtom = atom({ plugin: 'file-pane', key: 'ticksAll' } as const, false)
+const previewZoomAtom = atom({ plugin: 'file-pane', key: 'previewZoom' } as const, 1)
+const ticksAllAtom =atom({ plugin: 'file-pane', key: 'ticksAll' } as const, false)
 const ignoreSpaceAtom =atom({ plugin: 'file-pane', key: 'ignoreSpace' } as const, false)
 const diffBaseAtom = atom({ plugin: 'file-pane', key: 'diffBase' } as const, { path: '', base: 'commit' } as DiffBase)
 const wrapAtom = atom({ plugin: 'file-pane', key: 'wrap' } as const, true)
@@ -61,6 +62,11 @@ let appDirs: string[] | null = null
 let loadedStamp: { version: string; at: string } | null = null
 // a binary's info / readable text / hex page, by path|modified|mode|start (the helper's answers)
 const binCache = new Map<string, Record<string, unknown>>()
+// a picture or model preview as the pane draws it (a small PNG / JPEG, base64), by kind|path|size|modified, and the
+// ones being drawn now (in the background: a model's render can take seconds)
+type Thumb = { w: number; h: number; tw: number; th: number; b64: string; mime?: string; via?: string }
+const previews = new Map<string, Thumb | string>()
+const drawing = new Set<string>()
 // VS Code's own launcher (Code.exe + its cli.js), found once
 let vscode: { exe: string; cli: string } | null = null
 type Note = { text: string; at: number }
@@ -98,7 +104,21 @@ try {
   $g.DrawImage($img, 0, 0, $w, $h)
   $ms = New-Object IO.MemoryStream
   $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-  @{ w = $img.Width; h = $img.Height; tw = $w; th = $h; b64 = [Convert]::ToBase64String($ms.ToArray()) } | ConvertTo-Json -Compress
+  $mime = 'png'
+  # a detailed picture (a model's render) is too big as PNG for the pane: JPEG, on mid grey where it was see-through
+  if ($ms.Length -gt 82000) {
+    $flat = New-Object System.Drawing.Bitmap $w, $h
+    $g2 = [System.Drawing.Graphics]::FromImage($flat)
+    $g2.Clear([System.Drawing.Color]::FromArgb(128, 128, 128))
+    $g2.DrawImage($bmp, 0, 0, $w, $h)
+    $jpg = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+    $ep = New-Object System.Drawing.Imaging.EncoderParameters 1
+    $ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality), 88L
+    $ms = New-Object IO.MemoryStream
+    $flat.Save($ms, $jpg, $ep)
+    $mime = 'jpeg'
+  }
+  @{ w = $img.Width; h = $img.Height; tw = $w; th = $h; mime = $mime; b64 = [Convert]::ToBase64String($ms.ToArray()) } | ConvertTo-Json -Compress
 } finally { $img.Dispose() }`
 // 3D models and other files Windows can preview: what Explorer shows (Heimdall3D, Blender's BlendThumb, …)
 const MODEL = /\.(fbx|obj|stl|3mf|ply|dae|glb|gltf|blend|exr|hdr|dds|tga|tiff?|psd|webp|heic)$/i
@@ -451,22 +471,25 @@ try {
     out({ ok: true });
   } else if (cmd === 'probe') {
     // probe <model> <cache dir> <Program Files> [bycontent]: Heimdall3D's still of a .glb / .gltf (400 px), cached in
-    // <cache>\heimdall by path, size and modified time (bycontent: by its bytes, for a git temp copy). Only the probe
+    // <cache>\heimdall by path, size and modified time (bycontent: by its bytes, for a git temp copy). Its GPU mode
+    // draws materials and textures (2-4 s); the plain mode (a grey clay render) only when that fails. Only the probe
     // under Program Files runs, on this one file, with a timeout; the model is its input, nothing in it runs here.
     const exe = path.join(a[2] || '', 'Heimdall3D', 'heimdall_probe.exe');
     const st = fs.statSync(a[0]);
     if (!/^[A-Za-z]:\\/.test(exe) || !fs.existsSync(exe)) out({ error: "Heimdall3D isn't installed (no heimdall_probe.exe under Program Files)" });
     else {
       const crypto = require('crypto');
-      const key = (a[3] === 'bycontent' ? crypto.createHash('sha1').update(fs.readFileSync(a[0])) : crypto.createHash('sha1').update(path.resolve(a[0]).toLowerCase() + '|' + st.size + '|' + st.mtimeMs)).digest('hex').slice(0, 32);
+      const key = (a[3] === 'bycontent' ? crypto.createHash('sha1').update('gpu|').update(fs.readFileSync(a[0])) : crypto.createHash('sha1').update('gpu|' + path.resolve(a[0]).toLowerCase() + '|' + st.size + '|' + st.mtimeMs)).digest('hex').slice(0, 32);
       const dir = path.join(a[1], 'heimdall'), file = path.join(dir, key + '.png');
       if (fs.existsSync(file)) out({ ok: true, file, cached: true });
       else {
         fs.mkdirSync(dir, { recursive: true });
         const part = path.join(dir, key + '.part.png');
-        const r = require('child_process').spawnSync(exe, [a[0], part, '--size', '400', '--budget', 'thumbnail'], { windowsHide: true, timeout: 60000, encoding: 'utf8' });
+        const run = (args) => { fs.rmSync(part, { force: true }); return require('child_process').spawnSync(exe, args, { windowsHide: true, timeout: 60000, encoding: 'utf8' }); };
+        let r = run(['--gpu', a[0], part, '--size', '400', '--samples', '16']), gpu = r.status === 0 && fs.existsSync(part);
+        if (!gpu) r = run([a[0], part, '--size', '400', '--budget', 'thumbnail']);
         if (r.status !== 0 || !fs.existsSync(part)) out({ error: "Heimdall3D couldn't render it: " + (String(r.stderr || r.stdout || r.error || 'no picture').trim().split(/\r?\n/)[0] || 'no picture') });
-        else { fs.renameSync(part, file); out({ ok: true, file }); }
+        else { fs.renameSync(part, file); out({ ok: true, file, gpu }); }
       }
     }
   } else if (cmd === 'bininfo') {
@@ -537,6 +560,12 @@ try {
     else if (fs.statSync(a[0]).size > 16 * 1024 * 1024) out({ error: 'too big for javap here (over 16 MB)' });
     else if (a[2]) out({ diff: textDiff(a[3], javapOf(exe, a[2]) + '\n', javapOf(exe, a[0]) + '\n'), javap: exe });
     else out({ text: javapOf(exe, a[0]), javap: exe });
+  } else if (cmd === 'pcache') {
+    // pcache get|put <cache dir> <key>: a drawn preview (the pane's JSON, on stdin for put) kept in <cache>\previews,
+    // named by the key's hash (the key holds the file's path, size and modified time, so a changed file misses)
+    const dir = path.join(a[1], 'previews'), f = path.join(dir, require('crypto').createHash('sha1').update(a[2]).digest('hex').slice(0, 32) + '.json');
+    if (a[0] === 'get') out(fs.existsSync(f) ? { value: JSON.parse(fs.readFileSync(f, 'utf8')) } : {});
+    else { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(f + '.part', fs.readFileSync(0)); fs.renameSync(f + '.part', f); out({ ok: true }); }
   } else if (cmd === 'ziplist') {
     // ziplist <file>: the files in a zip / jar (size, date, name), from its central directory
     out(zipList(a[0]));
@@ -910,12 +939,12 @@ export const register: Register = on => {
     const Svg = 'Svg' in els ? els.Svg : null
     // a picture as a small PNG (Windows imaging), sized under the SVG element's 131,072 characters
     // shell: Explorer's thumbnail (3D models and the like) instead of decoding the picture
-    const thumb = async (path: string, shell = false): Promise<{ w: number; h: number; tw: number; th: number; b64: string; via?: string } | string> => {
+    const thumb = async (path: string, shell = false): Promise<Thumb | string> => {
       for (const max of [420, 280, 160]) {
         try {
           const q = (s: string) => `'${s.replace(/'/g, "''")}'`
           const r = await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', `& { ${shell ? SHELL_THUMB_PS : THUMB_PS} } ${q(path)} ${max}`], { timeoutMs: 45_000 })
-          const j = JSON.parse(r.stdout.trim() || '{}') as { w: number; h: number; tw: number; th: number; b64: string; via?: string; error?: string }
+          const j = JSON.parse(r.stdout.trim() || '{}') as Thumb & { error?: string }
           if (!j.b64) return (j.error || r.stderr || 'Windows imaging could not read it').split(/\r?\n/)[0]!
           if (j.b64.length < 120_000) return j
         } catch (err) {
@@ -924,18 +953,23 @@ export const register: Register = on => {
       }
       return 'too detailed to preview here'
     }
-    const picture = (key: string, t: { w: number; h: number; tw: number; th: number; b64: string }, alt: string) =>
-      Svg ? (
+    // zoom > 1: the middle of the picture, drawn at the same size (the SVG's viewBox crops it)
+    const picture = (key: string, t: Thumb, alt: string, zoom = 1) => {
+      const vw = t.tw / zoom
+      const vh = t.th / zoom
+      const box = `${((t.tw - vw) / 2).toFixed(1)} ${((t.th - vh) / 2).toFixed(1)} ${vw.toFixed(1)} ${vh.toFixed(1)}`
+      return Svg ? (
         <Svg
           key={key}
           alt={alt}
           width={t.tw}
           height={t.th}
-          source={`<svg xmlns="http://www.w3.org/2000/svg" width="${t.tw}" height="${t.th}" viewBox="0 0 ${t.tw} ${t.th}"><image href="data:image/png;base64,${t.b64}" width="${t.tw}" height="${t.th}"/></svg>`}
+          source={`<svg xmlns="http://www.w3.org/2000/svg" width="${t.tw}" height="${t.th}" viewBox="${box}"><image href="data:image/${t.mime === 'jpeg' ? 'jpeg' : 'png'};base64,${t.b64}" width="${t.tw}" height="${t.th}"/></svg>`}
         />
       ) : (
         <Text dimColor>{alt}</Text>
       )
+    }
     const showDiff = await read($, diffOpenAtom)
     const side = await read($, sideAtom)
     // ↩ Wrap: long lines continue on more rows, or stay one row cut at the edge (every Text / Code the pane draws)
@@ -2352,27 +2386,58 @@ export const register: Register = on => {
       let now: unknown = null
       let before: unknown = null
       let note = ''
-      // .glb / .gltf: Heimdall3D's own still first (cached), Explorer's thumbnail when it can't
-      let probeErr = ''
+      let pending = false
+      // .glb / .gltf: Heimdall3D's own render first (its PNG cached), Explorer's thumbnail when it can't; a string
+      // says why there's no picture
       const preview = async (p: string, byContent: boolean) => {
+        let probeErr = ''
         if (HEIMDALL.test(f.path)) {
           const r = await helper(['probe', p, cacheDir, (await $.env.get('ProgramFiles')) ?? '', ...(byContent ? ['bycontent'] : [])])
           if (typeof r.file === 'string') {
             const t = await thumb(r.file)
-            if (typeof t !== 'string') return { ...t, via: 'Heimdall3D (heimdall_probe)' }
+            if (typeof t !== 'string') return { ...t, via: `Heimdall3D (heimdall_probe${r.gpu ? ', GPU' : ''})` }
             probeErr = t
           } else if (r.error) probeErr = String(r.error)
         }
-        return thumb(p, shell)
+        const t = await thumb(p, shell)
+        return typeof t === 'string' && probeErr ? `${t} · ${probeErr}` : t
       }
       if (isSvg) {
         const src = await $.fs.read(f.path).catch(() => '')
         now = src.length <= 131_072 && /<svg[\s>]/i.test(src) ? src : null
         if (!now) note = src ? 'This SVG is too large or not an SVG to draw here: Edit as text shows it.' : "Couldn't read it."
       } else {
-        const t = await preview(f.path, false)
-        if (typeof t === 'string') note = `No preview: ${t}${probeErr ? ` · ${probeErr}` : ''}`
-        else now = t
+        // drawn once per file version (a model's render or Explorer's thumbnail can take seconds): kept in memory for
+        // redraws and on disk (file-pane-cache\previews) for other chats; the first time it draws in the background
+        // while the rest of the pane shows
+        const k = `${HEIMDALL.test(f.path) ? 'probe2' : shell ? 'shell' : 'image'}|${f.path}|${f.size}|${f.mtimeMs}`
+        const got = previews.get(k)
+        if (got === undefined && !drawing.has(k)) {
+          drawing.add(k)
+          void (async () => {
+            let r: Thumb | string
+            try {
+              const kept = await helper(['pcache', 'get', cacheDir, k])
+              if (kept.value && typeof kept.value === 'object') r = kept.value as Thumb
+              else {
+                r = await preview(f.path, false)
+                if (typeof r !== 'string') await helper(['pcache', 'put', cacheDir, k], JSON.stringify(r))
+              }
+            } catch (err) {
+              r = err instanceof Error ? err.message : String(err)
+            }
+            previews.set(k, r)
+            if (previews.size > 40) previews.delete(previews.keys().next().value!)
+            drawing.delete(k)
+            $.ui.invalidate('ui.render')
+          })()
+        }
+        if (got === undefined) {
+          note = 'Drawing the preview… (the first time can take a few seconds; kept after that)'
+          pending = true
+        }
+        else if (typeof got === 'string') note = `No preview: ${got}`
+        else now = got
       }
       if (showDiff.includes(diffKey)) {
         const tmp = join(cacheDir, `last-commit-${Date.now()}${f.path.slice(f.path.lastIndexOf('.'))}`)
@@ -2386,8 +2451,10 @@ export const register: Register = on => {
           void helper(['rmtemp', cacheDir, tmp])
         } else note = note || 'Not in git at the last commit (new, or outside a git folder).'
       }
+      // 🔍 Closer: a model's render is mostly floor around it, so it can be drawn zoomed in on its middle
+      const zoom = shell ? await read($, previewZoomAtom) : 1
       const draw = (k: string, v: unknown, alt: string) =>
-        typeof v === 'string' ? (Svg ? <Svg key={k} alt={alt} source={v} isInteractive /> : <Text wrap={wrapMode} dimColor>{alt}</Text>) : v ? picture(k, v as never, alt) : null
+        typeof v === 'string' ? (Svg ? <Svg key={k} alt={alt} source={v} isInteractive /> : <Text wrap={wrapMode} dimColor>{alt}</Text>) : v ? picture(k, v as Thumb, alt, zoom) : null
       // a model's thumbnail size says nothing about it: name what drew it instead
       const pic = now && typeof now !== 'string' ? (now as { w: number; h: number; via?: string }) : null
       const dims = !pic ? '' : shell ? (pic.via ? ` · preview by ${pic.via}` : '') : ` · ${pic.w}×${pic.h}`
@@ -2416,9 +2483,10 @@ export const register: Register = on => {
             <Button key="reveal" onPress={() => void $.process.run(['explorer.exe', `/select,${f.path}`])}>
               📂 Show in Explorer
             </Button>
+            {shell ? <Button key="zoom" label={`🔍 Closer${zoom > 1 ? ` (${zoom}×)` : ''}`} variant={zoom > 1 ? 'primary' : 'secondary'} onPress={() => void update($, previewZoomAtom, z => (z >= 2 ? 1 : z === 1 ? 1.5 : 2))} /> : null}
             {fileTools(f.path)}
           </Box>
-          {note ? <Text wrap={wrapMode} color="warning">{note}</Text> : null}
+          {note ? <Text wrap={wrapMode} color={pending ? undefined : 'warning'} dimColor={pending}>{note}</Text> : null}
           {showDiff.includes(diffKey) && before ? (
             <Box flexDirection="row" gap={2} flexWrap="wrap">
               <Box flexDirection="column">

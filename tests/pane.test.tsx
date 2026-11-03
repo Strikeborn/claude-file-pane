@@ -267,6 +267,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
             { name: 'ship.fbx', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'car.glb', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'boat.glb', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
+            { name: 'ship.obj', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'Fish.dll', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'Fish.class', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'mods.jar', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
@@ -274,11 +275,12 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   }))
   on('fs.exists', (_, e) => ({ value: String(e.path).startsWith(VS) }))
   on('fs.stat', (_, e) => ({
-    value: /\.(txt|png|fbx|glb|dll|cs|class|jar)$/i.test(String(e.path)) ? { kind: 'file', size: 4, mtimeMs: 1, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false },
+    value: /\.(txt|png|fbx|glb|obj|dll|cs|class|jar)$/i.test(String(e.path)) ? { kind: 'file', size: 4, mtimeMs: 1, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false },
   }))
   on('fs.read', (_, e) => {
     if (/code\.cmd$/i.test(String(e.path))) return { value: '@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"%~dp0..\\Code.exe" "%~dp0..\\abc123\\resources\\app\\out\\cli.js" %*\r\n' }
     if (/\.txt$/i.test(String(e.path))) return { value: 'hi\n' }
+    if (/\.obj$/i.test(String(e.path))) return { value: 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n' }
     if (/\.(png|fbx|glb)$/i.test(String(e.path))) return { value: '\u0089PNG\r\n\u001a\n\u0000\u0000' }
     if (/\.dll$/i.test(String(e.path))) return { value: 'MZ\u0090\u0000\u0003\u0000' }
     if (/\.class$/i.test(String(e.path))) return { value: 'Êþº¾\u0000\u0000' }
@@ -306,7 +308,9 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
       if (cmd === 'javap') return out(JSON.stringify(e.argv.length > 6 ? { diff: '@@ -9 +9 @@ int haul();\n-       0: iconst_1\n+       0: iconst_2\n' } : { text: 'public class Fish {\n  int haul();\n}\n', javap: 'C:\\Program Files\\Java\\jdk-21\\bin\\javap.exe' }))
       if (cmd === 'bindiff') return out(JSON.stringify({ same: false, oldSize: 235, newSize: 297, text: '@@ -1 +1 @@\n-HaulOld\n+HaulNew\n', hex: ['@@ 62 bytes added at 0x9; everything after is the same, just moved @@', '+00000009  12 0a  ..'] }))
       // Heimdall3D's probe: renders boat.glb into the cache; car.glb fails (so Explorer's thumbnail is asked)
-      if (cmd === 'probe') return out(JSON.stringify(/car\.glb$/.test(String(e.argv[4])) ? { error: "Heimdall3D couldn't render it: bad file" } : { ok: true, file: 'C:\\Users\\tester\\.claude\\file-pane-cache\\heimdall\\abc.png' }))
+      if (cmd === 'probe') return out(JSON.stringify(/car\.glb$/.test(String(e.argv[4])) ? { error: "Heimdall3D couldn't render it: bad file" } : { ok: true, gpu: true, file: 'C:\\Users\\tester\\.claude\\file-pane-cache\\heimdall\\abc.png' }))
+      // the preview cache: ship.obj's preview was drawn in an earlier chat; the rest are drawn now and kept
+      if (cmd === 'pcache') return out(e.argv[4] === 'get' && /ship\.obj\|/.test(String(e.argv[6])) ? JSON.stringify({ value: { w: 2, h: 2, tw: 2, th: 2, b64: 'iVBORw0KGgo=', mime: 'jpeg', via: 'an earlier chat' } }) : '{}')
       return out(cmd === 'gitblob' || cmd === 'rmtemp' ? '{"ok":true}' : '{}')
     }
     if (exe === 'powershell.exe') {
@@ -376,11 +380,34 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   // a .glb: Heimdall3D's own still (the probe from Program Files, cached), drawn as a picture, and named
   await ui.press({ key: 'back' })
   await ui.press({ key: 'e:boat.glb' })
-  for (let i = 0; i < 20 && !(await ui.find({ text: /preview by Heimdall3D \(heimdall_probe\)/ })); i++) await ui.drawn()
-  expect(await ui.find({ text: /preview by Heimdall3D \(heimdall_probe\)/ })).toBeDefined()
+  for (let i = 0; i < 20 && !(await ui.find({ text: /preview by Heimdall3D \(heimdall_probe, GPU\)/ })); i++) await ui.drawn()
+  expect(await ui.find({ text: /preview by Heimdall3D \(heimdall_probe, GPU\)/ })).toBeDefined()
   const probe = runs.find(r => r.argv[3] === 'probe' && /boat\.glb$/.test(String(r.argv[4])))!
   expect(probe.argv.slice(5)).toEqual(['C:\\Users\\tester\\.claude\\file-pane-cache', 'C:\\Users\\tester'])
   expect(runs.some(r => r.argv[0] === 'powershell.exe' && String(r.argv[4]).includes("'C:\\Users\\tester\\.claude\\file-pane-cache\\heimdall\\abc.png'"))).toBe(true)
+  // drawn once: kept on disk for other chats, and a redraw (Back and open again) runs nothing
+  await until(() => runs.some(r => r.argv[3] === 'pcache' && r.argv[4] === 'put' && /boat\.glb\|/.test(String(r.argv[6]))), 'keeping the preview')
+  const before = runs.length
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'e:boat.glb' })
+  expect(await ui.find({ text: /preview by Heimdall3D/ })).toBeDefined()
+  expect(runs.slice(before).filter(r => r.argv[0] === 'powershell.exe' || r.argv[3] === 'probe' || r.argv[3] === 'pcache')).toEqual([])
+  // 🔍 Closer: the middle of the picture (the SVG's viewBox), 1.5× then 2× then back
+  await ui.press({ key: 'zoom' })
+  expect((await ui.find({ key: 'zoom' }))?.text).toMatch(/Closer \(1\.5×\)/)
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toMatch(/viewBox="0\.2 0\.2 0\.7 0\.7"/)
+  await ui.press({ key: 'zoom' })
+  await ui.press({ key: 'zoom' })
+  expect((await ui.find({ key: 'zoom' }))?.text).toMatch(/^🔍 Closer$/)
+
+  // a preview drawn in an earlier chat comes from the disk cache: no PowerShell, a JPEG
+  const beforeObj = runs.length
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'e:ship.obj' })
+  for (let i = 0; i < 20 && !(await ui.find({ text: /preview by an earlier chat/ })); i++) await ui.drawn()
+  expect(await ui.find({ text: /preview by an earlier chat/ })).toBeDefined()
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toContain('data:image/jpeg;base64,')
+  expect(runs.slice(beforeObj).filter(r => r.argv[0] === 'powershell.exe')).toEqual([])
 
   const shows = async (re: RegExp) => {
     for (let i = 0; i < 20 && !(await ui.find({ text: re })); i++) await ui.drawn()

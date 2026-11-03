@@ -3,7 +3,7 @@
 A pane beside the Claude Code chat for browsing folders, reading and editing files, and keeping an eye on the project
 the chat is working in. It's a Claude Code mod (hooks module), not an MCP server or an app.
 
-Plugin name: `file-pane` · version 0.3.0 · open it with `/files` (or Claude can open it on a file with the
+Plugin name: `file-pane` · version 0.3.1 · open it with `/files` (or Claude can open it on a file with the
 `mcp__file-pane__open` tool; `mcp__file-pane__ticks` lists the checkboxes ticked through it).
 
 ## What it does
@@ -34,9 +34,14 @@ Plugin name: `file-pane` · version 0.3.0 · open it with `/files` (or Claude ca
   .tga .tif .psd .webp .heic) show Explorer's own thumbnail, made by whatever is installed for that type (Heimdall3D,
   Blender's BlendThumb). Only thumbnail makers under Program Files or Windows are used; for any other the pane shows
   Explorer's saved thumbnail if there is one. Text formats (.obj .gltf .dae .ply) also have Edit as text.
-- **.glb / .gltf** are drawn by Heimdall3D's own renderer (`heimdall_probe.exe` from Program Files, 400 px, about
-  0.1 s), cached in `~/.claude/file-pane-cache/heimdall` by path, size and modified time; when it can't, Explorer's
-  thumbnail as above. (Their Explorer thumbnail maker lives in %LOCALAPPDATA%, so the pane won't load it.)
+- **.glb / .gltf** are drawn by Heimdall3D's own renderer (`heimdall_probe.exe --gpu` from Program Files: materials and
+  textures, 400 px, 2-4 s; its plain grey render when the GPU one fails), the PNG kept in
+  `~/.claude/file-pane-cache/heimdall`; when it can't, Explorer's thumbnail as above. (Their Explorer thumbnail maker
+  lives in %LOCALAPPDATA%, so the pane won't load it.)
+- Every picture and model preview is drawn **once per file version**: the first time in the background (the pane says
+  "Drawing the preview…" and stays usable), then kept in memory for redraws and in `~/.claude/file-pane-cache/previews`
+  for other chats. A detailed one is sent as JPEG so it fits the pane in one go. **🔍 Closer** zooms a model's preview
+  to its middle (1.5×, 2×).
 - **↩ Wrap** (beside Files / Project, every view): long lines wrap onto more rows, or stay one row cut at the edge,
   everywhere the pane draws text (diffs side by side too, each line kept beside its pair). The editor box always wraps
   (the engine's field has no setting), so with Wrap off an open file reads as numbered code, one row a line, and
@@ -91,6 +96,7 @@ Plugin name: `file-pane` · version 0.3.0 · open it with `/files` (or Claude ca
 | `types/index.d.ts` | the mod's `$.state` contract (`file-pane.*` keys) and its value types |
 | `tests/pane.test.tsx` | checklists (counts, a tick logged and undone, the ticks tool, Only open, Edit mode, Split, Done dates, the Ticks tab) and the version line; presses every project tab and opens a file and a .md, in a non-git folder; flips ↩ Wrap through every view and draws a side-by-side diff both ways; opens a DLL in Info, Readable text, Hex and C# (ILSpy), a jar's file list and diff, a class's javap and bytecode diff; checks that VS Code and the temp-file removal run without cmd.exe, that a model previews through the shell thumbnail (and a refused thumbnail maker says why), and a .glb through Heimdall's probe; Claude's change (copy before its Edit, ± Claude's change, Put back), vs backup / commit, Ignore spaces, word highlights |
 | `CHANGELOG.md` | what changed, by version |
+| `samples/make-test-glb.mjs` → `samples/star-test.glb` | a test model for previews: a yellow star (material color), a red / blue checker plate (an embedded PNG texture) and a green cube |
 | `tsconfig.json` | extends `.claude-plugin/types/tsconfig.json` (written by the engine when it loads the mod) |
 | `deploy.mjs` | checks, then copies the mod into the folder every chat loads (not deployed itself), and writes its `deployed.json` stamp (version, time) |
 
