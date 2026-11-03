@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { BinView, Change, CheckResult, DiffBase, OpenFile, Tick } from '../types'
-import { NEXT_HEADING, blocksFrom, boxesIn, commitsFrom, featuresFrom, flipTask, headingPath, releasesFrom, sections, sideBySide, splitBoxes, tasks, wordDiff } from './project'
+import { DONE_DATE, NEXT_HEADING, blocksFrom, boxesIn, commitsFrom, featuresFrom, flipTask, headingPath, markDone, releasesFrom, sections, sideBySide, splitBoxes, tasks, wordDiff } from './project'
 import type { Block, Task, TimelineEntry } from './project'
 import type { EngineInterface } from 'claude-code'
 
@@ -41,7 +41,8 @@ const backupLogAtom = atom({ plugin: 'file-pane', key: 'backupLog' } as const, [
 const searchAtom = atom({ plugin: 'file-pane', key: 'search' } as const, '')
 const logErrorsAtom = atom({ plugin: 'file-pane', key: 'logErrorsOnly' } as const, false)
 const sideAtom = atom({ plugin: 'file-pane', key: 'sideBySide' } as const, false)
-const ignoreSpaceAtom = atom({ plugin: 'file-pane', key: 'ignoreSpace' } as const, false)
+const ticksAllAtom = atom({ plugin: 'file-pane', key: 'ticksAll' } as const, false)
+const ignoreSpaceAtom =atom({ plugin: 'file-pane', key: 'ignoreSpace' } as const, false)
 const diffBaseAtom = atom({ plugin: 'file-pane', key: 'diffBase' } as const, { path: '', base: 'commit' } as DiffBase)
 const wrapAtom = atom({ plugin: 'file-pane', key: 'wrap' } as const, true)
 const binViewAtom = atom({ plugin: 'file-pane', key: 'binView' } as const, { path: '', mode: 'info', at: 0 } as BinView)
@@ -1267,15 +1268,17 @@ export const register: Register = on => {
       const eol = text.includes('\r\n') ? '\r\n' : '\n'
       const lines = text.split(/\r?\n/)
       if (lines[line] !== raw) return say('That line changed in the file since it was shown: nothing was changed (shown again now).')
-      lines[line] = flipTask(raw)
+      // the first box is the one flipped: it was empty, so now it's ticked. With 📅 Done dates on, a tick writes
+      // "(done <date time>)" after the item; an untick takes a date like that off either way
+      const done = /\[( |x|X)\]/.exec(raw)?.[1] === ' '
+      const dated = done && (await within($, $.store.get('tickDates'), 2000, undefined)) === true
+      lines[line] = markDone(flipTask(raw), done, dated ? whenText(new Date().toISOString()) : undefined)
       const b = await backupOf(path)
       if (!b.ok) return say(`Not changed: the backup copy failed (${String(b.error ?? 'unknown')}).`)
       const r = await helper(['splice', path, '0', String(st.size)], lines.join(eol))
       if (!r.ok) return say(`Not changed: ${String(r.error ?? 'unknown')}.`)
       // logged for "what did I finish, when, where" (the pane's list, the ticks tool), and kept for Undo
-      // the first box is the one flipped: it was empty, so now it's ticked
-      const done = /\[( |x|X)\]/.exec(raw)?.[1] === ' '
-      const tick: Tick = { path, item: raw.replace(/^\s*[-*+]\s+\[.\]\s*/, ''), headings: headingPath(lines, line), done, at: Date.now(), line, raw: lines[line]! }
+      const tick: Tick = { path, item: raw.replace(/^\s*[-*+]\s+\[.\]\s*/, '').replace(DONE_DATE, ''), headings: headingPath(lines, line), done, at: Date.now(), line, raw: lines[line]! }
       await logTick($, tick)
       await update($, lastTickAtom, () => tick)
       await say(`${done ? 'Ticked' : 'Unticked'}: ${(tick.item || 'item').slice(0, 80)}`)
@@ -1468,6 +1471,15 @@ export const register: Register = on => {
         })()} />
       </Box>
     ) : null
+    // 📅 Done dates (every chat: kept in the store): a tick also writes "(done <date time>)" after the item, so the date
+    // travels with the file (the tick log only sees the pane's own ticks)
+    const tickDates = (await within($, $.store.get('tickDates'), 2000, undefined)) === true
+    const tickDatesButton = (
+      <Button key="tick-dates" label={tickDates ? '📅 Done dates: on' : '📅 Done dates'} variant={tickDates ? 'primary' : 'secondary'} onPress={() => void (async () => {
+        await $.store.set('tickDates', !tickDates)
+        await say(tickDates ? 'Ticks no longer write a date into the file.' : 'Ticks now write "(done <date time>)" after the item; unticking takes it off.')
+      })()} />
+    )
 
     const docView = async (path: string) => {
       let text = ''
@@ -1506,6 +1518,7 @@ export const register: Register = on => {
                 onPress={() => void update($, editModeAtom, list => (editMode ? list.filter(p => p.toLowerCase() !== path.toLowerCase()) : [...list, path].slice(-50)))}
               />
             ) : null}
+            {counts.length ? tickDatesButton : null}
             {parts.length > 1 ? (
               <Button key="doc-all" onPress={() => void update($, toggledAtom, list => {
                 const keys = parts.map(s => `${path}#${s.key}`)
@@ -1983,6 +1996,7 @@ export const register: Register = on => {
       const tabs: [typeof tab, string][] = [
         ['next', '🧭 Next'],
         ['items', '☑ Items'],
+        ['ticks', '📅 Ticks'],
         ['timeline', '🕒 Timeline'],
         ['features', '✨ Features'],
         ['blocks', '🧱 Building blocks'],
@@ -2045,6 +2059,51 @@ export const register: Register = on => {
               )
             })}
             {!total ? <Text wrap={wrapMode} dimColor>No checkboxes (- [ ]) in this project's Markdown files.</Text> : null}
+          </Box>
+        )
+      } else if (tab === 'ticks') {
+        // the tick log (every chat's, newest first) by day: this project's files, or every folder
+        const everywhere = await read($, ticksAllAtom)
+        const under = root.toLowerCase().replace(/[\\/]+$/, '')
+        const log = (await readTicks($)).filter(t => everywhere || t.path.toLowerCase().startsWith(`${under}\\`) || t.path.toLowerCase().startsWith(`${under}/`))
+        const shown = log.slice(0, 300)
+        const day = (ms: number) => whenText(new Date(ms).toISOString()).slice(0, 10)
+        const today = day(Date.now())
+        const yesterday = day(Date.now() - 86_400_000)
+        const days = [...new Set(shown.map(t => day(t.at)))]
+        const nameOf = (p: string) => (everywhere || !p.toLowerCase().startsWith(under) ? p : p.slice(root.length).replace(/^[\\/]/, ''))
+        body = (
+          <Box flexDirection="column" gap={1}>
+            <Box flexDirection="row" gap={1} flexWrap="wrap">
+              <Button key="ticks-all" label={everywhere ? 'Every folder' : 'This project'} onPress={() => void update($, ticksAllAtom, v => !v)} />
+              {tickDatesButton}
+            </Box>
+            <Text wrap={wrapMode} dimColor>
+              {`${log.length} tick${log.length === 1 ? '' : 's'} ${everywhere ? 'in every folder' : 'in this project'}, newest first${log.length > shown.length ? ` (the newest ${shown.length})` : ''}. The pane's own ticks, from every chat; ticks made in another editor aren't seen.`}
+            </Text>
+            {days.map(d => (
+              <Box key={`day:${d}`} flexDirection="column">
+                <Text wrap={wrapMode} bold>
+                  {d === today ? `Today (${d})` : d === yesterday ? `Yesterday (${d})` : d}
+                </Text>
+                {shown
+                  .map((t, i) => ({ t, i }))
+                  .filter(({ t }) => day(t.at) === d)
+                  .map(({ t, i }) => (
+                    <Box key={`tk:${i}`} flexDirection="row" gap={1} flexWrap="wrap" marginLeft={2}>
+                      <Text wrap={wrapMode} dimColor={t.done} color={t.done ? undefined : 'warning'}>
+                        {`${whenText(new Date(t.at).toISOString()).slice(11)} ${t.done ? '☑' : '☐ unticked'} ${t.item.slice(0, 90) || 'item'}${t.headings.length ? ` · ${t.headings.join(' › ')}` : ''}`}
+                      </Text>
+                      <Button key={`tko:${i}`} label={`${kindOf(t.path)[0]} ${nameOf(t.path)}`} plain onPress={() => void (async () => {
+                        await update($, viewAtom, () => 'files')
+                        await update($, asTextAtom, () => false)
+                        await openPath(t.path)
+                      })()} />
+                    </Box>
+                  ))}
+              </Box>
+            ))}
+            {!log.length ? <Text wrap={wrapMode} dimColor>No ticks logged yet{everywhere ? '' : ' in this project'} (the log starts with Files pane 0.2.0).</Text> : null}
           </Box>
         )
       } else if (tab === 'changes' || tab === 'git') {

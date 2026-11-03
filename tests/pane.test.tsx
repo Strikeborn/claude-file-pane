@@ -18,7 +18,7 @@ const PANE = {
 } as const
 
 const CWD = 'F:\\GT racing IPAD'
-const TABS = ['next', 'items', 'timeline', 'features', 'blocks', 'changes', 'git', 'checks', 'search', 'backups', 'log', 'notes']
+const TABS = ['next', 'items', 'ticks', 'timeline', 'features', 'blocks', 'changes', 'git', 'checks', 'search', 'backups', 'log', 'notes']
 
 test('every view of the Files pane draws in a non-git folder with one file', async ($, on) => {
   on('command.register', () => ({ value: { command: 'files' } }))
@@ -223,6 +223,27 @@ test('checklists: tick log, undo, counts, only open, edit mode, split; version l
   await ui.input({ key: `in:${FILE}#${lineOf('rest')}`, text: 'rest a lot' })
   for (let i = 0; i < 20 && !file.includes('rest a lot'); i++) await ui.drawn()
   expect(file).toContain('- [ ] rest a lot')
+
+  // 📅 Done dates: a tick writes "(done <date time>)" after the item; the untick takes it off; the log keeps the bare item
+  await ui.press({ key: 'edit-mode' })
+  await ui.press({ key: 'tick-dates' })
+  for (let i = 0; i < 20 && store.get('tickDates') !== true; i++) await ui.drawn()
+  expect(store.get('tickDates')).toBe(true)
+  await ui.press({ key: `t:${FILE}#${lineOf('rest a lot')}` })
+  for (let i = 0; i < 20 && !/\(done \d{4}/.test(file); i++) await ui.drawn()
+  expect(file).toMatch(/- \[x\] rest a lot \(done \d{4}-\d{2}-\d{2} \d{2}:\d{2}\)\n/)
+  expect((store.get('ticks') as { item: string }[])[0]!.item).toBe('rest a lot')
+  await ui.press({ key: `t:${FILE}#${lineOf('rest a lot')}` })
+  for (let i = 0; i < 20 && file.includes('(done'); i++) await ui.drawn()
+  expect(file).toContain('- [ ] rest a lot\n')
+
+  // the Ticks tab: the log across files, by day, with the headings and the file
+  await ui.press({ key: 'v-project' })
+  await ui.press({ key: 'tab:ticks' })
+  expect(await shows(/^Today \(/)).toBeDefined()
+  expect(await shows(/☑ buy paint · Plan › Week 1 › Mon/)).toBeDefined()
+  expect(await shows(/☐ unticked rest a lot · Plan › Week 2/)).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /notes\.md$/ })).toBeDefined()
   await ui.unmount()
 })
 

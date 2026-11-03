@@ -4,6 +4,18 @@ Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
 
+## 0.3.0 (2026-11-03, not deployed yet)
+- .glb / .gltf previews drawn by Heimdall3D's `heimdall_probe` (from Program Files), cached; Explorer's thumbnail when
+  it can't.
+- Binaries: 🗂 Files inside a zip / jar, ☕ Bytecode (javap) for a `.class`, ± Diff against the last commit (readable
+  text, hex with one inserted block shown as such, and javap's bytecode diff for a class).
+- Diffs: the words that changed highlighted side by side; ␣ Ignore spaces; a text file vs its newest backup or vs the
+  file before Claude's edits (a copy made before Claude's first Edit / Write of it in a session), with ± Claude's
+  change in Changes and ↩ Put back.
+- Checklists: Project → 📅 Ticks (the tick log by day, this project or every folder); 📅 Done dates writes
+  "(done <date time>)" after a ticked item.
+- This folder is a git repository (local, not pushed).
+
 ## 0.2.0 (deployed 2026-11-03 14:18; wording redeploy 14:38)
 - Checklists: tick log in the mod's store and the `ticks` tool, ↶ Undo, x of y per heading, Only open per section,
   ✎ Edit mode, Split for several boxes on one line.

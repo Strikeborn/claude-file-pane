@@ -44,6 +44,14 @@ export function tasks(lines: string[]): Task[] {
 
 export const flipTask = (raw: string) => raw.replace(/\[( |x|X)\]/, (_a, c: string) => (c === ' ' ? '[x]' : '[ ]'))
 
+/** The date the pane writes after a ticked item when asked to: `- [x] paint (done 2026-11-03 14:50)`. */
+export const DONE_DATE = /\s+\(done \d{4}-\d{2}-\d{2} \d{2}:\d{2}\)\s*$/
+/** A flipped line with its done date: added when ticked and `stamp` is given, taken off when unticked. */
+export const markDone = (raw: string, ticked: boolean, stamp?: string) => {
+  const bare = raw.replace(DONE_DATE, '')
+  return !ticked ? bare : stamp ? `${bare} (done ${stamp})` : raw
+}
+
 /** The headings above line `at`, outermost first (`## Plan` › `### Week 1`), code fences skipped. */
 export function headingPath(lines: string[], at: number): string[] {
   const stack: { level: number; title: string }[] = []
