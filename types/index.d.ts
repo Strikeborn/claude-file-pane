@@ -23,7 +23,7 @@ export type OpenFile = {
 export type Tick = { path: string; item: string; headings: string[]; done: boolean; at: number; line: number; raw: string };
 
 /** How a binary file shows (for `path`; another file starts at info, byte 0). */
-export type BinView = { path: string; mode: 'info' | 'text' | 'hex'; at: number };
+export type BinView = { path: string; mode: 'info' | 'text' | 'hex' | 'files' | 'java' | 'diff'; at: number };
 
 /** A file Claude edited this session (from its Edit / Write / NotebookEdit calls). */
 export type Change = { path: string; tool: string; at: number; n: number };
@@ -75,7 +75,8 @@ declare module 'claude-code' {
       wrap: boolean;
       /** The file whose note is being written. */
       noteOpen: string;
-      /** A binary file's view: what it is (info), its readable text, or its bytes; `at` the byte its page starts at. */
+      /** A binary file's view: what it is (info), its readable text, its bytes, the files in a zip / jar, a class's
+       * bytecode (java), or its diff against the last commit; `at` the byte a text / hex page starts at. */
       binView: BinView;
       /** The last tick / untick, for its Undo (line `line` of `path` now reads `raw`). */
       lastTick: Tick | null;

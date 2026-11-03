@@ -244,18 +244,23 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
             { name: 'pic.png', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'ship.fbx', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'car.glb', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
+            { name: 'boat.glb', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
             { name: 'Fish.dll', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
+            { name: 'Fish.class', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
+            { name: 'mods.jar', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
           ] : [],
   }))
   on('fs.exists', (_, e) => ({ value: String(e.path).startsWith(VS) }))
   on('fs.stat', (_, e) => ({
-    value: /\.(txt|png|fbx|glb|dll|cs)$/i.test(String(e.path)) ? { kind: 'file', size: 4, mtimeMs: 1, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false },
+    value: /\.(txt|png|fbx|glb|dll|cs|class|jar)$/i.test(String(e.path)) ? { kind: 'file', size: 4, mtimeMs: 1, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false },
   }))
   on('fs.read', (_, e) => {
     if (/code\.cmd$/i.test(String(e.path))) return { value: '@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"%~dp0..\\Code.exe" "%~dp0..\\abc123\\resources\\app\\out\\cli.js" %*\r\n' }
     if (/\.txt$/i.test(String(e.path))) return { value: 'hi\n' }
     if (/\.(png|fbx|glb)$/i.test(String(e.path))) return { value: '\u0089PNG\r\n\u001a\n\u0000\u0000' }
     if (/\.dll$/i.test(String(e.path))) return { value: 'MZ\u0090\u0000\u0003\u0000' }
+    if (/\.class$/i.test(String(e.path))) return { value: 'Êþº¾\u0000\u0000' }
+    if (/\.jar$/i.test(String(e.path))) return { value: 'PK\u0003\u0004\u0000\u0000' }
     if (/\.cs$/i.test(String(e.path))) return { value: 'namespace Fish\n{\n  public class Fishy { }\n}\n' }
     throw new Error('ENOENT')
   })
@@ -274,6 +279,12 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
       if (cmd === 'strings') return out(JSON.stringify({ start: 0, end: 100, size: 100, lines: ['00000040  Fish.Patches.HaulFix'] }))
       if (cmd === 'hex') return out(JSON.stringify({ start: 0, end: 100, size: 100, lines: ['00000000  4d 5a 90 00  MZ..'] }))
       if (cmd === 'ilspy') return out(JSON.stringify({ ok: true, file: 'C:\\Users\\tester\\.claude\\file-pane-cache\\ilspy\\abc-Fish.dll.cs' }))
+      if (cmd === 'ziplist') return out(JSON.stringify({ count: 2, bytes: 361, lines: ['         64  2026-11-03 14:47  META-INF/MANIFEST.MF', '        297  2026-11-03 14:47  Fish.class'] }))
+      // javap: the bytecode, or (with an older copy) its diff
+      if (cmd === 'javap') return out(JSON.stringify(e.argv.length > 6 ? { diff: '@@ -9 +9 @@ int haul();\n-       0: iconst_1\n+       0: iconst_2\n' } : { text: 'public class Fish {\n  int haul();\n}\n', javap: 'C:\\Program Files\\Java\\jdk-21\\bin\\javap.exe' }))
+      if (cmd === 'bindiff') return out(JSON.stringify({ same: false, oldSize: 235, newSize: 297, text: '@@ -1 +1 @@\n-HaulOld\n+HaulNew\n', hex: ['@@ 62 bytes added at 0x9; everything after is the same, just moved @@', '+00000009  12 0a  ..'] }))
+      // Heimdall3D's probe: renders boat.glb into the cache; car.glb fails (so Explorer's thumbnail is asked)
+      if (cmd === 'probe') return out(JSON.stringify(/car\.glb$/.test(String(e.argv[4])) ? { error: "Heimdall3D couldn't render it: bad file" } : { ok: true, file: 'C:\\Users\\tester\\.claude\\file-pane-cache\\heimdall\\abc.png' }))
       return out(cmd === 'gitblob' || cmd === 'rmtemp' ? '{"ok":true}' : '{}')
     }
     if (exe === 'powershell.exe') {
@@ -338,12 +349,53 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   await ui.press({ key: 'e:car.glb' })
   for (let i = 0; i < 20 && !(await ui.find({ text: /No preview: .*Program Files/ })); i++) await ui.drawn()
   expect(await ui.find({ text: /No preview: .*Program Files/ })).toBeDefined()
+  expect(await ui.find({ text: /No preview: .*Heimdall3D couldn't render it: bad file/ })).toBeDefined()
 
-  // a DLL: what it is (PE info), its readable text, its bytes, and C# through ILSpy (opened as a file)
+  // a .glb: Heimdall3D's own still (the probe from Program Files, cached), drawn as a picture, and named
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'e:boat.glb' })
+  for (let i = 0; i < 20 && !(await ui.find({ text: /preview by Heimdall3D \(heimdall_probe\)/ })); i++) await ui.drawn()
+  expect(await ui.find({ text: /preview by Heimdall3D \(heimdall_probe\)/ })).toBeDefined()
+  const probe = runs.find(r => r.argv[3] === 'probe' && /boat\.glb$/.test(String(r.argv[4])))!
+  expect(probe.argv.slice(5)).toEqual(['C:\\Users\\tester\\.claude\\file-pane-cache', 'C:\\Users\\tester'])
+  expect(runs.some(r => r.argv[0] === 'powershell.exe' && String(r.argv[4]).includes("'C:\\Users\\tester\\.claude\\file-pane-cache\\heimdall\\abc.png'"))).toBe(true)
+
   const shows = async (re: RegExp) => {
     for (let i = 0; i < 20 && !(await ui.find({ text: re })); i++) await ui.drawn()
     return ui.find({ text: re })
   }
+
+  // a jar: the files inside (from its directory), and ± Diff against the last commit (readable text and hex)
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'e:mods.jar' })
+  await ui.press({ key: 'bin-files' })
+  expect(await shows(/^2 entries, .* unpacked/)).toBeDefined()
+  expect(await shows(/297 {2}2026-11-03 14:47 {2}Fish\.class/)).toBeDefined()
+  await ui.press({ key: 'bin-diff' })
+  expect(await shows(/Last commit 235 B → now 297 B/)).toBeDefined()
+  expect(await shows(/HaulNew/)).toBeDefined()
+  expect(await shows(/62 bytes added at 0x9/)).toBeDefined()
+  await ui.press({ key: 'side' })
+  expect(await shows(/^\+ HaulNew$/)).toBeDefined()
+  await ui.press({ key: 'side' })
+  const bindiff = runs.find(r => r.argv[3] === 'bindiff')!
+  expect(String(bindiff.argv[4])).toMatch(/file-pane-cache\\last-commit-\d+\.jar$/)
+  expect(bindiff.argv[5]).toBe(`${DIR}\\mods.jar`)
+  await until(() => runs.some(r => r.argv[3] === 'rmtemp' && /\.jar$/.test(String(r.argv[5]))), 'removing the jar temp copy')
+
+  // a class: its bytecode through javap, and the bytecode diff (javap on both copies)
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'e:Fish.class' })
+  await ui.press({ key: 'bin-java' })
+  expect(await shows(/public class Fish/)).toBeDefined()
+  expect(await shows(/by C:\\Program Files\\Java\\jdk-21\\bin\\javap\.exe/)).toBeDefined()
+  await ui.press({ key: 'bin-diff' })
+  expect(await shows(/iconst_2/)).toBeDefined()
+  const javapDiff = runs.find(r => r.argv[3] === 'javap' && r.argv.length > 6)!
+  expect(javapDiff.argv[4]).toBe(`${DIR}\\Fish.class`)
+  expect(String(javapDiff.argv[6])).toMatch(/last-commit-\d+\.class$/)
+
+  // a DLL: what it is (PE info), its readable text, its bytes, and C# through ILSpy (opened as a file)
   await ui.press({ key: 'back' })
   await ui.press({ key: 'e:Fish.dll' })
   expect(await shows(/FileVersion = 1\.2\.3\.4/)).toBeDefined()

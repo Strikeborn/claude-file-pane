@@ -101,6 +101,12 @@ try {
 const MODEL = /\.(fbx|obj|stl|3mf|ply|dae|glb|gltf|blend|exr|hdr|dds|tga|tiff?|psd|webp|heic)$/i
 // the ones that are text, so Edit as text makes sense
 const MODEL_TEXT = /\.(obj|gltf|dae|ply)$/i
+// drawn by Heimdall3D's own renderer (heimdall_probe, under Program Files): their Explorer thumbnail maker lives in
+// %LOCALAPPDATA%, which the shell thumbnail refuses (SECURITY finding 5)
+const HEIMDALL = /\.(glb|gltf)$/i
+// binaries that are zips inside (a file list from the zip's directory), and Java classes (javap)
+const ZIPPED = /\.(zip|jar|apk|aar|nupkg|whl|vsix|docx|xlsx|pptx|epub|mrpack|mcpack)$/i
+const JAVA_CLASS = /\.class$/i
 // The shell thumbnail (IShellItemImageFactory, as Explorer asks for it), same JSON as THUMB_PS plus `via` (the
 // provider's DLL). Only a provider under Program Files or Windows is loaded; any other gets Explorer's cached
 // thumbnail at most (SIIGBF_INCACHEONLY loads no provider). The model is the provider's to read: nothing runs it here.
@@ -302,6 +308,104 @@ const describePe = (b) => {
   }
   return { lines, dotnet };
 };
+// the readable text in a buffer (as the strings command finds it), without offsets: they move when anything is added
+const stringsOf = (b) => {
+  const s = b.toString('latin1'), found = [], wordy = (t) => /[A-Za-z]{4}/.test(t) && (t.match(/[A-Za-z]/g) || []).length >= t.length / 2;
+  for (const m of s.matchAll(/[\x20-\x7e]{5,}/g)) if (wordy(m[0])) found.push([m.index, m[0].slice(0, 400)]);
+  for (const m of s.matchAll(/(?:[\x20-\x7e]\x00){5,}/g)) { const t = m[0].replace(/\x00/g, ''); if (wordy(t)) found.push([m.index, t.slice(0, 400) + '  (UTF-16)']); }
+  return found.sort((x, y) => x[0] - y[0]).slice(0, 20000).map(x => x[1]);
+};
+// two texts as a unified diff (git diff --no-index on two files of the pane's own in <cache>\diff, removed after)
+const textDiff = (cache, oldText, newText) => {
+  const dir = path.join(cache, 'diff');
+  fs.mkdirSync(dir, { recursive: true });
+  const base = path.join(dir, process.pid + '-' + Date.now()), fa = base + '-before.txt', fb = base + '-after.txt';
+  fs.writeFileSync(fa, oldText); fs.writeFileSync(fb, newText);
+  try {
+    const r = require('child_process').spawnSync('git', ['diff', '--no-index', '--no-color', '-U3', '--', fa, fb], { encoding: 'utf8', windowsHide: true, timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
+    return (r.stdout || '').split(/\r?\n/).filter(l => !/^(diff --git|index |--- |\+\+\+ )/.test(l)).slice(0, 6000).join('\n');
+  } finally { fs.rmSync(fa, { force: true }); fs.rmSync(fb, { force: true }); }
+};
+// hex around where two binaries differ (ModKeeper's hexDiff): one inserted / removed / replaced block shown as such
+// (hexInsertion: the rest only moved), else up to 6 regions of changed 16-byte lines, old then new
+const hexLine = (buf, off, end) => {
+  const bytes = [...buf.subarray(off, Math.min(end === undefined ? off + 16 : end, off + 16))];
+  return off.toString(16).padStart(8, '0') + '  ' + bytes.map(x => x.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ') + '  ' + bytes.map(x => (x >= 0x20 && x < 0x7f ? String.fromCharCode(x) : '.')).join('');
+};
+const hexDiff = (a, b) => {
+  let p = 0;
+  const min = Math.min(a.length, b.length);
+  while (p < min && a[p] === b[p]) p++;
+  if (p === a.length && p === b.length) return [];
+  let s = 0;
+  while (s < min - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  const oldEnd = a.length - s, newEnd = b.length - s, out = [];
+  if (oldEnd - p <= 4096 && newEnd - p <= 4096 && a.length !== b.length) {
+    const what = oldEnd === p ? (newEnd - p) + ' bytes added at 0x' + p.toString(16) : newEnd === p ? (oldEnd - p) + ' bytes removed at 0x' + p.toString(16) : (oldEnd - p) + ' bytes replaced by ' + (newEnd - p) + ' at 0x' + p.toString(16);
+    out.push('@@ ' + what + '; everything after is the same, just moved @@');
+    if (p > 0) out.push(' ' + hexLine(a, Math.max(0, p - 16), p));
+    for (let o = p; o < oldEnd; o += 16) out.push('-' + hexLine(a, o, oldEnd));
+    for (let o = p; o < newEnd; o += 16) out.push('+' + hexLine(b, o, newEnd));
+    if (oldEnd < a.length) out.push(' ' + hexLine(a, oldEnd, a.length));
+    out.push('@@ size ' + a.length + ' → ' + b.length + ' bytes @@');
+    return out;
+  }
+  const max = Math.max(a.length, b.length);
+  let regions = 0;
+  for (let off = 0; off < max && regions < 6; off += 16) {
+    if (a.subarray(off, off + 16).equals(b.subarray(off, off + 16))) continue;
+    regions++;
+    const start = Math.max(0, off - 16), run = [];
+    out.push('@@ bytes 0x' + start.toString(16) + ' @@');
+    if (start < off) out.push(' ' + hexLine(a, start));
+    let o = off;
+    while (o < max && !a.subarray(o, o + 16).equals(b.subarray(o, o + 16)) && run.length < 8) { run.push(o); o += 16; }
+    for (const r of run) if (r < a.length) out.push('-' + hexLine(a, r));
+    for (const r of run) if (r < b.length) out.push('+' + hexLine(b, r));
+    if (o < Math.min(a.length, b.length)) out.push(' ' + hexLine(a, o));
+    off = o;
+  }
+  if (a.length !== b.length) out.push('@@ size ' + a.length + ' → ' + b.length + ' bytes @@');
+  return out;
+};
+// the JDK's class disassembler, only from Program Files (the usual JDK folders, newest name first)
+const findJavap = (pf) => {
+  if (!/^[A-Za-z]:\\/.test(pf || '')) return null;
+  for (const vendor of ['Eclipse Adoptium', 'Java', 'Microsoft', 'Zulu', 'BellSoft']) {
+    let list = [];
+    try { list = fs.readdirSync(path.join(pf, vendor)).sort().reverse(); } catch (e) { list = []; }
+    for (const d of list) { const exe = path.join(pf, vendor, d, 'bin', 'javap.exe'); if (fs.existsSync(exe)) return exe; }
+  }
+  return null;
+};
+const javapOf = (exe, file) => {
+  const r = require('child_process').spawnSync(exe, ['-c', '-p', file], { encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 32 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error('javap failed: ' + String(r.stderr || r.error || '').trim().split(/\r?\n/)[0]);
+  // its file path, size and checksum lines differ between two copies of the same class: left out
+  return r.stdout.split(/\r?\n/).filter(l => !/^\s*(Compiled from|Classfile |Last modified|SHA-256 checksum|MD5 checksum)/.test(l)).join('\n');
+};
+// a zip / jar's file list from its central directory (read only, nothing unpacked)
+const zipList = (file) => {
+  const size = fs.statSync(file).size, tail = readPart(file, Math.max(0, size - 65557), Math.min(size, 65557));
+  let e = -1;
+  for (let i = tail.length - 22; i >= 0; i--) if (tail.readUInt32LE(i) === 0x06054b50) { e = i; break; }
+  if (e < 0) return { error: 'no zip directory at its end (damaged, or not a zip)' };
+  const total = tail.readUInt16LE(e + 10), cdSize = tail.readUInt32LE(e + 12), cdOff = tail.readUInt32LE(e + 16);
+  if (cdOff === 0xffffffff || cdSize === 0xffffffff) return { error: 'a zip64 archive (over 4 GB or 65,535 files): its list isn’t read here' };
+  const cd = readPart(file, cdOff, Math.min(cdSize, size - cdOff)), entries = [];
+  let bytes = 0;
+  for (let o = 0; o + 46 <= cd.length && cd.readUInt32LE(o) === 0x02014b50 && entries.length < 20000; ) {
+    const time = cd.readUInt16LE(o + 12), date = cd.readUInt16LE(o + 14), usize = cd.readUInt32LE(o + 24);
+    const nlen = cd.readUInt16LE(o + 28), xlen = cd.readUInt16LE(o + 30), clen = cd.readUInt16LE(o + 32);
+    const name = cd.toString(cd.readUInt16LE(o + 8) & 0x800 ? 'utf8' : 'latin1', o + 46, o + 46 + nlen);
+    const two = (n) => String(n).padStart(2, '0');
+    const when = ((date >> 9) + 1980) + '-' + two((date >> 5) & 15) + '-' + two(date & 31) + ' ' + two(time >> 11) + ':' + two((time >> 5) & 63);
+    bytes += usize;
+    entries.push(String(usize).padStart(11, ' ') + '  ' + when + '  ' + name);
+    o += 46 + nlen + xlen + clen;
+  }
+  return { count: total, bytes, lines: entries };
+};
 try {
   if (cmd === 'page') {
     const f = a[0], start = Number(a[1]), max = Number(a[2]);
@@ -342,6 +446,26 @@ try {
   } else if (cmd === 'restore') {
     swap(a[1], fs.readFileSync(a[0]));
     out({ ok: true });
+  } else if (cmd === 'probe') {
+    // probe <model> <cache dir> <Program Files> [bycontent]: Heimdall3D's still of a .glb / .gltf (400 px), cached in
+    // <cache>\heimdall by path, size and modified time (bycontent: by its bytes, for a git temp copy). Only the probe
+    // under Program Files runs, on this one file, with a timeout; the model is its input, nothing in it runs here.
+    const exe = path.join(a[2] || '', 'Heimdall3D', 'heimdall_probe.exe');
+    const st = fs.statSync(a[0]);
+    if (!/^[A-Za-z]:\\/.test(exe) || !fs.existsSync(exe)) out({ error: "Heimdall3D isn't installed (no heimdall_probe.exe under Program Files)" });
+    else {
+      const crypto = require('crypto');
+      const key = (a[3] === 'bycontent' ? crypto.createHash('sha1').update(fs.readFileSync(a[0])) : crypto.createHash('sha1').update(path.resolve(a[0]).toLowerCase() + '|' + st.size + '|' + st.mtimeMs)).digest('hex').slice(0, 32);
+      const dir = path.join(a[1], 'heimdall'), file = path.join(dir, key + '.png');
+      if (fs.existsSync(file)) out({ ok: true, file, cached: true });
+      else {
+        fs.mkdirSync(dir, { recursive: true });
+        const part = path.join(dir, key + '.part.png');
+        const r = require('child_process').spawnSync(exe, [a[0], part, '--size', '400', '--budget', 'thumbnail'], { windowsHide: true, timeout: 60000, encoding: 'utf8' });
+        if (r.status !== 0 || !fs.existsSync(part)) out({ error: "Heimdall3D couldn't render it: " + (String(r.stderr || r.stdout || r.error || 'no picture').trim().split(/\r?\n/)[0] || 'no picture') });
+        else { fs.renameSync(part, file); out({ ok: true, file }); }
+      }
+    }
   } else if (cmd === 'bininfo') {
     // bininfo <file>: what a binary is (by its first bytes) and, for a DLL / EXE, what its PE headers say (read only)
     const size = fs.statSync(a[0]).size;
@@ -392,6 +516,27 @@ try {
       }
       out(error ? { error } : { ok: true, file: cached });
     }
+  } else if (cmd === 'bindiff') {
+    // bindiff <old> <new> <cache dir>: two versions of a binary, as their readable text (a unified diff) and the hex
+    // around where the bytes differ. 64 MiB each at most; read only.
+    const sa = fs.statSync(a[0]).size, sb = fs.statSync(a[1]).size;
+    if (sa > 64 * 1024 * 1024 || sb > 64 * 1024 * 1024) out({ error: 'too big to compare here (over 64 MB)' });
+    else {
+      const x = fs.readFileSync(a[0]), y = fs.readFileSync(a[1]);
+      const same = x.equals(y);
+      out({ same, oldSize: sa, newSize: sb, text: same ? '' : textDiff(a[2], stringsOf(x).join('\n') + '\n', stringsOf(y).join('\n') + '\n'), hex: same ? [] : hexDiff(x, y) });
+    }
+  } else if (cmd === 'javap') {
+    // javap <class> <Program Files> [<old class> <cache dir>]: a Java class's bytecode (javap -c -p), or the diff of
+    // an older copy's against it. The JDK's javap reads the class; nothing in it runs.
+    const exe = findJavap(a[1]);
+    if (!exe) out({ error: "no JDK's javap found under Program Files (Eclipse Adoptium, Java, Microsoft, Zulu, BellSoft)" });
+    else if (fs.statSync(a[0]).size > 16 * 1024 * 1024) out({ error: 'too big for javap here (over 16 MB)' });
+    else if (a[2]) out({ diff: textDiff(a[3], javapOf(exe, a[2]) + '\n', javapOf(exe, a[0]) + '\n'), javap: exe });
+    else out({ text: javapOf(exe, a[0]), javap: exe });
+  } else if (cmd === 'ziplist') {
+    // ziplist <file>: the files in a zip / jar (size, date, name), from its central directory
+    out(zipList(a[0]));
   } else out({ error: 'unknown command' });
 } catch (e) { out({ error: String((e && e.message) || e) }); }
 `
@@ -2081,13 +2226,26 @@ export const register: Register = on => {
       let now: unknown = null
       let before: unknown = null
       let note = ''
+      // .glb / .gltf: Heimdall3D's own still first (cached), Explorer's thumbnail when it can't
+      let probeErr = ''
+      const preview = async (p: string, byContent: boolean) => {
+        if (HEIMDALL.test(f.path)) {
+          const r = await helper(['probe', p, cacheDir, (await $.env.get('ProgramFiles')) ?? '', ...(byContent ? ['bycontent'] : [])])
+          if (typeof r.file === 'string') {
+            const t = await thumb(r.file)
+            if (typeof t !== 'string') return { ...t, via: 'Heimdall3D (heimdall_probe)' }
+            probeErr = t
+          } else if (r.error) probeErr = String(r.error)
+        }
+        return thumb(p, shell)
+      }
       if (isSvg) {
         const src = await $.fs.read(f.path).catch(() => '')
         now = src.length <= 131_072 && /<svg[\s>]/i.test(src) ? src : null
         if (!now) note = src ? 'This SVG is too large or not an SVG to draw here: Edit as text shows it.' : "Couldn't read it."
       } else {
-        const t = await thumb(f.path, shell)
-        if (typeof t === 'string') note = `No preview: ${t}`
+        const t = await preview(f.path, false)
+        if (typeof t === 'string') note = `No preview: ${t}${probeErr ? ` · ${probeErr}` : ''}`
         else now = t
       }
       if (showDiff.includes(diffKey)) {
@@ -2096,7 +2254,7 @@ export const register: Register = on => {
         if (g.ok) {
           if (isSvg) before = await $.fs.read(tmp).catch(() => null)
           else {
-            const t = await thumb(tmp, shell)
+            const t = await preview(tmp, true)
             before = typeof t === 'string' ? null : t
           }
           void helper(['rmtemp', cacheDir, tmp])
@@ -2162,7 +2320,39 @@ export const register: Register = on => {
       const setBv = (next: Partial<BinView>) => update($, binViewAtom, () => ({ ...bv, ...next }))
       // kept per file version and page: a redraw (any click) doesn't read the file again
       const binKey = `${f.path}|${f.mtimeMs}|${bv.mode}|${bv.at}`
-      const r = binCache.get(binKey) ?? (await helper(bv.mode === 'info' ? ['bininfo', f.path] : [bv.mode === 'text' ? 'strings' : 'hex', f.path, String(bv.at)]))
+      const programs = (await $.env.get('ProgramFiles')) ?? ''
+      // ± Diff: the copy at the last commit (a temp file in the cache, removed after) against the file now: readable
+      // text and hex, and a class's bytecode through javap
+      const binDiff = async (): Promise<Record<string, unknown>> => {
+        const tmp = join(cacheDir, `last-commit-${Date.now()}${f.path.slice(f.path.lastIndexOf('.'))}`)
+        const g = await helper(['gitblob', f.path, tmp])
+        if (!g.ok) return { error: 'not in git at the last commit (new, or outside a git folder)' }
+        try {
+          const d = await helper(['bindiff', tmp, f.path, cacheDir])
+          if (JAVA_CLASS.test(f.path) && !d.error && !d.same) {
+            const j = await helper(['javap', f.path, programs, tmp, cacheDir])
+            return { ...d, javapDiff: j.diff, javapError: j.error }
+          }
+          return d
+        } finally {
+          void helper(['rmtemp', cacheDir, tmp])
+        }
+      }
+      const binRead = (): Promise<Record<string, unknown>> => {
+        switch (bv.mode) {
+          case 'info':
+            return helper(['bininfo', f.path])
+          case 'files':
+            return helper(['ziplist', f.path])
+          case 'java':
+            return helper(['javap', f.path, programs])
+          case 'diff':
+            return binDiff()
+          default:
+            return helper([bv.mode === 'text' ? 'strings' : 'hex', f.path, String(bv.at)])
+        }
+      }
+      const r = binCache.get(binKey) ?? (await binRead())
       if (!r.error) binCache.set(binKey, r)
       if (binCache.size > 40) binCache.delete(binCache.keys().next().value!)
       const lines = Array.isArray(r.lines) ? (r.lines as string[]) : []
@@ -2173,7 +2363,16 @@ export const register: Register = on => {
       const body =
         bv.mode === 'info'
           ? [`What it is: ${String(r.kind ?? 'unknown')}`, `Size: ${sizeText(size)}`, ...(pe ?? [])].join('\n')
-          : lines.join('\n') || (bv.mode === 'text' ? '(no readable text in this part)' : '')
+          : bv.mode === 'java'
+            ? String(r.text ?? '')
+            : lines.join('\n') || (bv.mode === 'text' ? '(no readable text in this part)' : bv.mode === 'files' && !r.error ? '(no files in it)' : '')
+      // ± Diff's parts: a heading, then its diff (or a line saying it's the same)
+      const diffPart = (k: string, title: string, text: unknown, same: string) => [
+        <Text key={`h:${k}`} bold>
+          {title}
+        </Text>,
+        typeof text === 'string' && text.trim() ? diffView(k, text.slice(0, DRAW / 2)) : <Text key={`s:${k}`} dimColor wrap={wrapMode}>{same}</Text>,
+      ]
       const decompile = async () => {
         await say('Decompiling with ILSpy (a few seconds the first time; kept after that)…')
         const d = await helper(['ilspy', f.path, cacheDir])
@@ -2197,10 +2396,44 @@ export const register: Register = on => {
             <Button key="bin-info" label="ℹ Info" variant={bv.mode === 'info' ? 'primary' : 'secondary'} onPress={() => void setBv({ mode: 'info', at: 0 })} />
             <Button key="bin-text" label="🔤 Readable text" variant={bv.mode === 'text' ? 'primary' : 'secondary'} onPress={() => void setBv({ mode: 'text', at: 0 })} />
             <Button key="bin-hex" label="🔢 Hex" variant={bv.mode === 'hex' ? 'primary' : 'secondary'} onPress={() => void setBv({ mode: 'hex', at: 0 })} />
+            {ZIPPED.test(f.path) ? <Button key="bin-files" label="🗂 Files inside" variant={bv.mode === 'files' ? 'primary' : 'secondary'} onPress={() => void setBv({ mode: 'files', at: 0 })} /> : null}
+            {JAVA_CLASS.test(f.path) ? <Button key="bin-java" label="☕ Bytecode (javap)" variant={bv.mode === 'java' ? 'primary' : 'secondary'} onPress={() => void setBv({ mode: 'java', at: 0 })} /> : null}
+            <Button key="bin-diff" label="± Diff" variant={bv.mode === 'diff' ? 'primary' : 'secondary'} onPress={() => void setBv({ mode: 'diff', at: 0 })} />
+            {bv.mode === 'diff' ? sideToggle : null}
             {bv.mode === 'info' && r.dotnet ? <Button key="bin-cs" label="C# (ILSpy)" onPress={() => void decompile()} /> : null}
           </Box>
-          {r.error ? <Text wrap={wrapMode} color="error">{`Couldn't read it: ${String(r.error)}`}</Text> : null}
-          {bv.mode !== 'info' ? (
+          {r.error ? <Text wrap={wrapMode} color="error">{bv.mode === 'diff' ? `No diff: ${String(r.error)}` : `Couldn't read it: ${String(r.error)}`}</Text> : null}
+          {bv.mode === 'files' && !r.error ? (
+            <Text wrap={wrapMode} dimColor>
+              {`${Number(r.count ?? lines.length).toLocaleString('en-US')} entries, ${sizeText(Number(r.bytes ?? 0))} unpacked${lines.length >= 20000 ? ' · first 20,000 shown' : ''} · read from its directory, nothing unpacked`}
+            </Text>
+          ) : null}
+          {bv.mode === 'java' && typeof r.javap === 'string' ? <Text wrap={wrapMode} dimColor>{`by ${r.javap} (javap -c -p)`}</Text> : null}
+          {bv.mode === 'diff' && !r.error ? (
+            <Box key="bin-diff-body" flexDirection="column" gap={1}>
+              <Text wrap={wrapMode} dimColor>
+                {r.same ? 'The same bytes as at the last commit.' : `Last commit ${sizeText(Number(r.oldSize ?? 0))} → now ${sizeText(Number(r.newSize ?? 0))}`}
+              </Text>
+              {r.same
+                ? null
+                : [
+                    ...(JAVA_CLASS.test(f.path) ? diffPart('bin-javap', 'Bytecode (javap -c -p)', r.javapDiff, r.javapError ? `No bytecode diff: ${String(r.javapError)}` : 'The bytecode is the same (only debug info or the constant pool changed).') : []),
+                    ...diffPart('bin-strings', 'Readable text', r.text, 'The readable text is the same.'),
+                    <Text key="h:bin-hexdiff" bold>
+                      Bytes (hex)
+                    </Text>,
+                    // not a unified diff (its @@ lines say what moved), so drawn row by row, colored by its sign
+                    <Box key="bin-hexdiff" flexDirection="column">
+                      {(Array.isArray(r.hex) ? (r.hex as string[]) : []).slice(0, 400).map((l, i) => (
+                        <Text key={`x${i}`} wrap={wrapMode} dimColor={l.startsWith('@@')} color={l.startsWith('-') ? 'diffRemoved' : l.startsWith('+') ? 'diffAdded' : undefined}>
+                          {l}
+                        </Text>
+                      ))}
+                    </Box>,
+                  ]}
+            </Box>
+          ) : null}
+          {bv.mode === 'text' || bv.mode === 'hex' ? (
             <Box flexDirection="row" gap={1} flexWrap="wrap">
               <Button key="bin-prev" label="◀ Earlier" onPress={() => void setBv({ at: Math.max(0, bv.at - step) })} />
               <Button key="bin-next" label="Later ▶" onPress={() => void (end < size ? setBv({ at: end }) : say('That was the end of the file.'))} />
@@ -2210,7 +2443,7 @@ export const register: Register = on => {
             </Box>
           ) : null}
           {noteBlock(f.path)}
-          {Code ? <Code key={`bin:${bv.mode}`} source={body.slice(0, DRAW)} wrap={wrapMode} /> : <Text wrap={wrapMode}>{body.slice(0, DRAW)}</Text>}
+          {bv.mode === 'diff' ? null : Code ? <Code key={`bin:${bv.mode}`} source={body.slice(0, DRAW)} wrap={wrapMode} /> : <Text wrap={wrapMode}>{body.slice(0, DRAW)}</Text>}
         </Box>
       )
     }
