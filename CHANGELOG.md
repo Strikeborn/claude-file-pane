@@ -4,7 +4,7 @@ Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
 
-## 0.4.0 (not deployed yet)
+## 0.4.0 (deployed 2026-11-03 17:30)
 - Binaries: 🗂 Files inside lists each file as a button (up to 300) that opens a copy of it (copied out to
   `file-pane-cache\zip`, CRC checked, read only); a zip / jar's ± Diff says which files inside were added, removed or
   changed; a class whose bytecode is the same shows what moved in its debug info (`javap -l`); a .NET DLL's ± Diff has
