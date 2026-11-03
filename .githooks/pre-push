@@ -1,0 +1,3 @@
+#!/bin/sh
+# refuses a push carrying personal data or a key (scripts/prepush-check.mjs; SECURITY.md finding 10)
+exec node "$(git rev-parse --show-toplevel)/scripts/prepush-check.mjs"

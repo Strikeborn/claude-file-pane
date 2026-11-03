@@ -1,7 +1,8 @@
 // Deploy: check this folder, then copy it into the folder Claude Code loads (~/.claude/mods/file-pane, named by
 // CLAUDE_CODE_PLUGIN_DIRS in ~/.claude/settings.json). Work here; run `node deploy.mjs` to put a change live.
-//   node deploy.mjs          checks (validate, typecheck when the engine's types are here, pane test), then copy
+//   node deploy.mjs          checks (validate, typecheck when the engine's types are here, pane test, helper test), then copy
 //   node deploy.mjs --check  checks only
+//   node deploy.mjs --no-release   deploy without the git tag + GitHub release (scripts/release.mjs)
 // The loaded copy is backed up first (~/.claude/file-pane-backups/deploy-<time>), so a bad deploy can be put back.
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -33,6 +34,7 @@ if (fs.existsSync(path.join(src, '.claude-plugin', 'types', 'tsconfig.json')))
   run('typecheck', 'npx', ['-y', '-p', 'typescript', 'tsc', '-p', '.', '--noEmit']);
 else console.log('typecheck… skipped (no engine types here yet: they appear once a session loads this folder)');
 run('pane test', 'claude', ['plugin', 'test', '.']);
+run('helper test', 'node', ['--test', 'tests/helper.check.mjs']);
 if (process.argv.includes('--check')) process.exit(0);
 
 // back up what's loaded now
@@ -60,3 +62,12 @@ const version = JSON.parse(fs.readFileSync(path.join(src, '.claude-plugin', 'plu
 const at = new Date().toISOString();
 fs.writeFileSync(path.join(dest, 'deployed.json'), JSON.stringify({ version, at }) + '\n');
 console.log(`deployed ${version} (${at}) to ${dest}: new chats load it, and open chats started with CLAUDE_CODE_PLUGIN_DIR_WATCH=1 reload it in a moment`);
+
+// a tag and GitHub release for this version (when all is committed; once per version); --no-release skips it
+if (!process.argv.includes('--no-release')) {
+  try {
+    execSync('node scripts/release.mjs', { cwd: src, stdio: 'inherit' });
+  } catch {
+    /* it said why; the deploy itself is done */
+  }
+}
