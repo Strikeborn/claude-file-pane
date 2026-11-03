@@ -4,7 +4,7 @@ Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
 
-## 0.3.0 (2026-11-03, not deployed yet)
+## 0.3.0 (deployed 2026-11-03 15:18)
 - .glb / .gltf previews drawn by Heimdall3D's `heimdall_probe` (from Program Files), cached; Explorer's thumbnail when
   it can't.
 - Binaries: 🗂 Files inside a zip / jar, ☕ Bytecode (javap) for a `.class`, ± Diff against the last commit (readable
