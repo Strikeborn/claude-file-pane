@@ -3,7 +3,7 @@
 A pane beside the Claude Code chat for browsing folders, reading and editing files, and keeping an eye on the project
 the chat is working in. It's a Claude Code mod (hooks module), not an MCP server or an app.
 
-Plugin name: `file-pane` · version 0.5.0 · open it with `/files` (or Claude can open it on a file with the
+Plugin name: `file-pane` · version 0.4.1 · open it with `/files` (or Claude can open it on a file with the
 `mcp__file-pane__open` tool; `mcp__file-pane__ticks` lists the checkboxes ticked through it).
 
 ## What it does

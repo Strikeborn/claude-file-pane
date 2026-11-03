@@ -4,7 +4,7 @@ Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
 
-## 0.5.0 (not deployed yet)
+## 0.4.1 (deployed 2026-11-03 17:47)
 - A jar / zip's ± Diff: each added / removed / changed file is a button for its own diff (a class by javap, text as
   text, anything else as readable text and hex), from the last commit's copy and the file now, nothing unpacked to disk.
 - 🗂 Files inside a zip of more than 300 files: a 🔎 box finds files by part of their name; each match opens.
