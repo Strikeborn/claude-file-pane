@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { BinView, Change, CheckResult, DiffBase, OpenFile, Tick } from '../types'
-import { DONE_DATE, NEXT_HEADING, blocksFrom, boxesIn, commitsFrom, featuresFrom, flipTask, headingPath, markDone, releasesFrom, sections, sideBySide, splitBoxes, tasks, wordDiff } from './project'
+import { DONE_DATE, NEXT_HEADING, blocksFrom, boxesIn, commitsFrom, featuresFrom, flipTask, headingPath, markDone, numberedDiff, releasesFrom, sections, sideBySide, splitBoxes, tasks, wordDiff } from './project'
 import type { Block, Task, TimelineEntry } from './project'
 import { SHELL_THUMB_PS, THUMB_PS } from './scripts'
 import type { EngineInterface } from 'claude-code'
@@ -48,6 +48,14 @@ const ignoreSpaceAtom =atom({ plugin: 'file-pane', key: 'ignoreSpace' } as const
 const diffBaseAtom = atom({ plugin: 'file-pane', key: 'diffBase' } as const, { path: '', base: 'commit' } as DiffBase)
 const wrapAtom = atom({ plugin: 'file-pane', key: 'wrap' } as const, true)
 const binViewAtom = atom({ plugin: 'file-pane', key: 'binView' } as const, { path: '', mode: 'info', at: 0 } as BinView)
+// the Project tabs by name (`/files <tab>` opens one)
+const PROJECT_TABS = ['next', 'items', 'ticks', 'timeline', 'features', 'blocks', 'changes', 'git', 'checks', 'search', 'backups', 'log', 'notes'] as const
+const lineNosAtom = atom({ plugin: 'file-pane', key: 'diffLineNumbers' } as const, false)
+const compactAtom = atom({ plugin: 'file-pane', key: 'compact' } as const, false)
+const sortAtom = atom({ plugin: 'file-pane', key: 'sortBy' } as const, 'name' as 'name' | 'size' | 'date')
+const folderFindAtom = atom({ plugin: 'file-pane', key: 'folderFind' } as const, '')
+const followAtom = atom({ plugin: 'file-pane', key: 'followClaude' } as const, false)
+const conflictAtom = atom({ plugin: 'file-pane', key: 'conflict' } as const, null as { path: string; at: number } | null)
 const zipFilterAtom = atom({ plugin: 'file-pane', key: 'zipFilter' } as const, { path: '', text: '' })
 const zipEntryAtom = atom({ plugin: 'file-pane', key: 'zipEntry' } as const, { path: '', name: '' })
 const lastTickAtom = atom({ plugin: 'file-pane', key: 'lastTick' } as const, null as Tick | null)
@@ -332,6 +340,80 @@ async function snapshotBefore($: EngineInterface, path: unknown): Promise<string
   }
 }
 
+/**
+ * Opens a file in the pane from a hook or a tool (not a press): a text file up to PAGE bytes whole, anything else by
+ * its folder (a press opens it, with paging). Says what it did. Unsaved typing for another file is dropped, as a
+ * click on another file drops it.
+ */
+async function openForAgent($: EngineInterface, path: string): Promise<string> {
+  const st = await $.fs.stat(path).catch(() => null)
+  if (!st) return `Not found: ${path}`
+  if (st.kind === 'dir') {
+    await update($, openAtom, () => null)
+    await update($, dirAtom, () => path)
+    return `Showing the folder ${path}.`
+  }
+  await update($, dirAtom, () => parent(path))
+  await update($, recentAtom, list => [path, ...list.filter(p => p.toLowerCase() !== path.toLowerCase())].slice(0, 15))
+  const text = st.kind === 'file' && st.size <= PAGE ? await $.fs.read(path).catch(() => null) : null
+  if (text === null || text.slice(0, 8000).includes('\u0000')) {
+    await update($, openAtom, () => null)
+    await update($, msgAtom, () => `${path} is in this folder: click it to open it (big or binary files open on a click).`)
+    return `Showing the folder of ${path} (it's big or binary: a click opens it).`
+  }
+  const s = shown(text)
+  draft = null
+  await update($, openAtom, () => ({ path, size: st.size, mtimeMs: st.mtimeMs, mode: 'whole' as const, start: 0, end: st.size, text: s.text, eol: s.eol, bom: s.bom, binary: false }))
+  return `Opened ${path}.`
+}
+
+/**
+ * After Claude's Edit / Write of a file went through: the pane open on it reloads (it showed the old text); with
+ * unsaved typing for it, a conflict warning instead (the typing stays; Save refuses, the file changed); with
+ * 👁 Follow Claude on, the file opens with that edit's diff.
+ */
+async function afterClaudeEdit($: EngineInterface, path: unknown): Promise<void> {
+  if (typeof path !== 'string' || !path) return
+  const open = await read($, openAtom)
+  const same = open !== null && open.path.toLowerCase() === path.toLowerCase()
+  if (same && draft && draft.key.startsWith(`${open.path}|`) && draft.text !== open.text) {
+    await update($, conflictAtom, () => ({ path, at: Date.now() }))
+    return
+  }
+  const follow = await read($, followAtom)
+  if (follow) {
+    await openForAgent($, path)
+    await update($, diffOpenAtom, list => (list.includes(`filediff:${path}`) ? list : [...list, `filediff:${path}`].slice(-50)))
+    // the newest edit (the render takes the last step there is)
+    await update($, diffBaseAtom, () => ({ path, base: 'claude' as const, edit: Number.MAX_SAFE_INTEGER }))
+  } else if (same && open.mode === 'whole') await openForAgent($, path)
+}
+
+// the programs the pane leans on, found or not (checked once per chat, in the background)
+type Health = { name: string; ok: boolean; for: string }[]
+let health: Health | null = null
+let healthStarted = false
+
+/** Which of the pane's outside programs are there (Node, git, a JDK's javap, ILSpy, Heimdall3D), and what each is for. */
+async function checkHealth($: EngineInterface): Promise<Health> {
+  const runs = async (argv: string[]) => (await $.process.run(argv, { timeoutMs: 10_000 }).catch(() => null))?.exitCode === 0
+  const pf = (await $.env.get('ProgramFiles')) ?? ''
+  const home = (await $.env.get('USERPROFILE')) ?? ''
+  const exists = (p: string) => $.fs.exists(p).catch(() => false)
+  let javap = false
+  for (const vendor of ['Eclipse Adoptium', 'Java', 'Microsoft', 'Zulu', 'BellSoft']) {
+    const dirs = pf ? await $.fs.list(join(pf, vendor)).catch(() => []) : []
+    for (const d of dirs) if (!javap && d.kind === 'dir') javap = await exists(join(join(join(join(pf, vendor), d.name), 'bin'), 'javap.exe'))
+  }
+  return [
+    { name: 'Node', ok: await runs(['node', '--version']), for: 'saving, backups, paging, binaries' },
+    { name: 'git', ok: await runs(['git', '--version']), for: 'diffs, Git, Timeline' },
+    { name: 'javap', ok: javap, for: '☕ Bytecode and class diffs (a JDK under Program Files)' },
+    { name: 'ILSpy', ok: home ? await exists(join(join(join(home, '.dotnet'), 'tools'), 'ilspycmd.exe')) : false, for: 'C# of .NET DLLs (dotnet tool install -g ilspycmd)' },
+    { name: 'Heimdall3D', ok: pf ? await exists(join(join(pf, 'Heimdall3D'), 'heimdall_probe.exe')) : false, for: '.glb / .gltf previews' },
+  ]
+}
+
 /** The tick log ($.store `ticks`, newest first, shared by every chat), or [] when unreadable. */
 async function readTicks($: EngineInterface): Promise<Tick[]> {
   const v = await within($, $.store.get('ticks'), 2000, undefined)
@@ -366,15 +448,114 @@ export const register: Register = on => {
         },
       },
     })
+    await $.tool.register({
+      name: 'show',
+      description:
+        "Shows the person a file in the Files pane beside the chat (absolute path), optionally with its diff (against the last commit, the file before Claude's edits this session, or its newest backup) or pointing at one line. Use it to show them where something is or what changed.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'The file to show (absolute)' },
+          diff: { type: 'string', enum: ['commit', 'claude', 'backup'], description: 'Show its diff against this' },
+          line: { type: 'number', description: 'Point at this line (1-based): the pane says what it reads' },
+        },
+        required: ['path'],
+      },
+    })
+    await $.tool.register({
+      name: 'backups',
+      description:
+        "The backup copies the Files pane made of a file (before each save, and before each of Claude's edits), newest first: the copy's path and when. Read a copy to see or compare an older version.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Only copies of this file, or of files under this folder (absolute)' },
+          limit: { type: 'number', description: 'At most this many (default 20, at most 200)' },
+        },
+      },
+    })
+    await $.tool.register({
+      name: 'notes',
+      description: 'The notes the person wrote about files in the Files pane (per file), newest first. Read them before changing a file they noted.',
+      inputSchema: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'Only this file, or files under this folder (absolute)' } },
+      },
+    })
     if (!(await read($, dirAtom))) await update($, dirAtom, () => '')
     void $.ui.open({ id: PANE, title: 'Files' })
     return next(e)
   })
 
-  on('command.run', { command: 'files' }, async $ => {
+  // /files, /files <project tab> (ticks, changes, items, git…), /files <path>
+  on('command.run', { command: 'files' }, async ($, e) => {
     await update($, bandHiddenAtom, () => false)
-    await $.ui.open({ id: PANE, title: 'Files' })
-    return { text: 'Files pane opened.' }
+    const arg = String(e.args ?? '').trim().replace(/^"(.*)"$/, '$1')
+    const tab = PROJECT_TABS.find(t => t === arg.toLowerCase())
+    let text = 'Files pane opened.'
+    if (tab) {
+      await update($, viewAtom, () => 'project')
+      await update($, tabAtom, () => tab)
+      text = `Files pane opened at Project → ${tab}.`
+    } else if (arg) {
+      await update($, viewAtom, () => 'files')
+      text = await openForAgent($, /^[A-Za-z]:[\\/]|^[\\/]/.test(arg) ? arg : join(await $.session.cwd(), arg))
+    }
+    await $.ui.open({ id: PANE, title: 'Files', focus: true })
+    return { text }
+  })
+
+  // show a file (with its diff, or one line) to the person
+  on('tool.call', { tool: 'mcp__file-pane__show' }, async ($, e) => {
+    const answer = (text: string) => ({ result: text, text })
+    const path = typeof e.path === 'string' ? e.path.trim() : ''
+    if (!path) return answer('Give the file to show (an absolute path).')
+    await update($, viewAtom, () => 'files')
+    let said = await openForAgent($, path)
+    const diff = e.diff === 'commit' || e.diff === 'claude' || e.diff === 'backup' ? e.diff : undefined
+    if (diff) {
+      await update($, diffOpenAtom, list => (list.includes(`filediff:${path}`) ? list : [...list, `filediff:${path}`].slice(-50)))
+      await update($, diffBaseAtom, () => ({ path, base: diff }))
+      said += ` With its diff against ${diff === 'commit' ? 'the last commit' : diff === 'claude' ? "the file before Claude's edits" : 'its newest backup'}.`
+    }
+    const open = await read($, openAtom)
+    if (typeof e.line === 'number' && open?.path === path) {
+      const n = Math.max(1, Math.floor(e.line))
+      const at = open.text.split('\n')[n - 1]
+      await update($, msgAtom, () => (at === undefined ? `Claude pointed at line ${n} (the file has fewer lines).` : `Claude points at line ${n}: ${at.trim().slice(0, 300)}`))
+      said += ` Pointed at line ${n}.`
+    }
+    const r = await $.ui.open({ id: PANE, title: 'Files', focus: true })
+    return answer(r.isPlaced ? said : `${said} (The pane isn't drawn: ${r.reason}.)`)
+  })
+
+  // the backup copies of a file, for an agent comparing or restoring an older version
+  on('tool.call', { tool: 'mcp__file-pane__backups' }, async ($, e) => {
+    const where = typeof e.path === 'string' ? e.path.trim().toLowerCase().replace(/[\\/]+$/, '') : ''
+    const limit = Math.min(200, Math.max(1, typeof e.limit === 'number' ? Math.floor(e.limit) : 20))
+    const under = (p: string) => !where || p.toLowerCase() === where || p.toLowerCase().startsWith(`${where}\\`) || p.toLowerCase().startsWith(`${where}/`)
+    const changes = await read($, changesAtom)
+    const claudeCopies = new Set(changes.flatMap(c => [c.before ?? '', ...(c.edits ?? []).map(x => x.before)]).filter(Boolean))
+    const list = (await read($, backupLogAtom))
+      .filter(b => under(b.original))
+      .slice(0, limit)
+      .map(b => ({ file: b.original, copy: b.backup, at: new Date(b.at).toISOString(), made: claudeCopies.has(b.backup) ? "before one of Claude's edits" : 'before a save in the pane' }))
+    const text = list.length
+      ? list.map(b => `${b.at} ${b.file} → ${b.copy} (${b.made})`).join('\n')
+      : 'No backups listed for that in this chat (the copies are in ~/.claude/file-pane-backups, named <time>-<file name>).'
+    return { result: list, text }
+  })
+
+  // the person's per-file notes
+  on('tool.call', { tool: 'mcp__file-pane__notes' }, async ($, e) => {
+    const where = typeof e.path === 'string' ? e.path.trim().toLowerCase().replace(/[\\/]+$/, '') : ''
+    const all = ((await within($, $.store.get('notes'), 2000, undefined)) ?? {}) as Record<string, Note>
+    const list = Object.entries(all)
+      .filter(([p, n]) => n.text.trim() && (!where || p.toLowerCase() === where || p.toLowerCase().startsWith(`${where}\\`) || p.toLowerCase().startsWith(`${where}/`)))
+      .sort(([, a], [, b]) => b.at - a.at)
+      .map(([p, n]) => ({ path: p, note: n.text, at: new Date(n.at).toISOString() }))
+    const text = list.length ? list.map(n => `${n.path} (${n.at}):\n${n.note}`).join('\n\n') : 'No notes for that.'
+    return { result: list, text }
   })
 
   // the model's way to open it: at a folder (listed) or a file (its folder listed; open it from there)
@@ -412,13 +593,17 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const before = await snapshotBefore($, e.file_path)
     const r = await next(e)
-    await recordChange($, e.file_path, 'Edit', r.deny === undefined && r.isError !== true, before)
+    const ok = r.deny === undefined && r.isError !== true
+    await recordChange($, e.file_path, 'Edit', ok, before)
+    if (ok) await afterClaudeEdit($, e.file_path)
     return r
   })
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
     const before = await snapshotBefore($, e.file_path)
     const r = await next(e)
-    await recordChange($, e.file_path, 'Write', r.deny === undefined && r.isError !== true, before)
+    const ok = r.deny === undefined && r.isError !== true
+    await recordChange($, e.file_path, 'Write', ok, before)
+    if (ok) await afterClaudeEdit($, e.file_path)
     return r
   })
   on('tool.call', { tool: 'NotebookEdit' }, async ($, e, next) => {
@@ -432,6 +617,7 @@ export const register: Register = on => {
     if (e.props.hasSurvey || (await read($, bandHiddenAtom))) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const changes = (await read($, changesAtom)).length
+    const conflict = await read($, conflictAtom)
     const failing = Object.entries(await read($, resultsAtom)).filter(([, r]) => !r.ok).map(([k]) => k)
     let open = 0
     try {
@@ -445,7 +631,12 @@ export const register: Register = on => {
           await update($, viewAtom, () => 'files')
           await $.ui.open({ id: PANE, title: 'Files', focus: true })
         })()} />
-
+        {conflict ? (
+          <Button key="band-conflict" label={`⚠ ${conflict.path.split(/[\\/]/).pop()}: Claude edited it over your unsaved typing`} plain onPress={() => void (async () => {
+            await update($, viewAtom, () => 'files')
+            await $.ui.open({ id: PANE, title: 'Files', focus: true })
+          })()} />
+        ) : null}
         {changes ? (
           <Button key="band-changes" label={`✎ ${changes} edited`} plain onPress={() => void (async () => {
             await update($, viewAtom, () => 'project')
@@ -525,19 +716,46 @@ export const register: Register = on => {
     }
     const showDiff = await read($, diffOpenAtom)
     const side = await read($, sideAtom)
+    const lineNos = await read($, lineNosAtom)
     // ↩ Wrap: long lines continue on more rows, or stay one row cut at the edge (every Text / Code the pane draws)
     const wrap = await read($, wrapAtom)
+    const follow = await read($, followAtom)
+    // the tools check runs once per chat, in the background (a module variable, not state: drawing can't write state)
+    if (!healthStarted) {
+      healthStarted = true
+      void checkHealth($).then(h => {
+        health = h
+        $.ui.invalidate('ui.render')
+      })
+    }
+    const compact = await read($, compactAtom)
+    const conflict = await read($, conflictAtom)
     const wrapMode = wrap ? ('wrap' as const) : ('truncate-end' as const)
     // a diff, one column (colored by the Code element) or two (before | after)
     const diffView = (k: string, text: string) => {
+      // # Line numbers in one column: the lines drawn one by one (the engine's diff view numbers nothing)
+      if (!side && lineNos)
+        return (
+          <Box key={`dv:${k}`} flexDirection="column">
+            {numberedDiff(text)
+              .slice(0, 3000)
+              .map((l, i) => (
+                <Text key={`n${i}`} wrap={wrapMode} dimColor={l.kind === 'hunk' || l.kind === 'meta'} color={l.kind === 'del' ? 'diffRemoved' : l.kind === 'add' ? 'diffAdded' : undefined}>
+                  {l.kind === 'hunk' || l.kind === 'meta' ? l.text : `${String(l.oldNo ?? '').padStart(5, ' ')} ${String(l.newNo ?? '').padStart(5, ' ')} ${l.text}`}
+                </Text>
+              ))}
+          </Box>
+        )
       if (!side) return Code ? <Code key={`dv:${k}`} source={text} format="diff" wrap={wrapMode} /> : <Text key={`dv:${k}`} wrap={wrapMode}>{text}</Text>
       const rows = sideBySide(text).slice(0, 1500)
-      // a row's side: its sign, then the line, with the words that differ from the other side highlighted
+      // a row's side: its line number (with # Line numbers), its sign, then the line, with the words that differ from
+      // the other side highlighted
       const cellText = (r: (typeof rows)[number], which: 'left' | 'right') => {
         const v = which === 'left' ? r.left : r.right
         if (v === undefined) return ' '
+        const no = lineNos ? `${String((which === 'left' ? r.leftNo : r.rightNo) ?? '').padStart(5, ' ')} ` : ''
         const changed = r.kind === 'change'
-        const sign = changed ? (which === 'left' ? '- ' : '+ ') : '  '
+        const sign = no + (changed ? (which === 'left' ? '- ' : '+ ') : '  ')
         if (!changed || r.left === undefined || r.right === undefined || !v) return `${sign}${v || ' '}`
         const parts = wordDiff(r.left, r.right)[which]
         return [
@@ -619,6 +837,7 @@ export const register: Register = on => {
           ⇆ Side by side
         </Button>
         <Button key="ws" label="␣ Ignore spaces" variant={ignoreSpace ? 'primary' : 'secondary'} onPress={() => void update($, ignoreSpaceAtom, v => !v)} />
+        <Button key="linenos" label="# Line numbers" variant={lineNos ? 'primary' : 'secondary'} onPress={() => void update($, lineNosAtom, v => !v)} />
       </Box>
     )
     // notes are a convenience: a store that can't be read leaves them out, never the pane
@@ -748,6 +967,8 @@ export const register: Register = on => {
       }
       const s = shown(text)
       draft = null
+      // reopened: a conflict warning about it is done with
+      await update($, conflictAtom, c => (c && c.path.toLowerCase() === path.toLowerCase() ? null : c))
       const file: OpenFile = { path, size: st.size, mtimeMs: st.mtimeMs, mode: 'whole', start: 0, end: st.size, text: s.text, eol: s.eol, bom: s.bom, binary: text.slice(0, 8000).includes('\u0000') }
       await update($, openAtom, () => file)
       await say('')
@@ -1834,11 +2055,34 @@ export const register: Register = on => {
           <Button key="v-project" variant={view === 'project' ? 'primary' : 'secondary'} onPress={() => void update($, viewAtom, () => 'project')}>
             Project
           </Button>
-          <Button key="wrap" label={wrap ? '↩ Wrap: on' : '↩ Wrap: off'} variant={wrap ? 'primary' : 'secondary'} onPress={() => void update($, wrapAtom, v => !v)} />
+          <Button key="wrap" label={compact ? '↩' : wrap ? '↩ Wrap: on' : '↩ Wrap: off'} variant={wrap ? 'primary' : 'secondary'} onPress={() => void update($, wrapAtom, v => !v)} />
+          <Button key="follow" label={compact ? '👁' : follow ? '👁 Follow Claude: on' : '👁 Follow Claude: off'} variant={follow ? 'primary' : 'secondary'} onPress={() => void update($, followAtom, v => !v)} />
+          <Button key="compact" label={compact ? '▤ Full labels' : '▤ Compact'} variant={compact ? 'primary' : 'secondary'} onPress={() => void update($, compactAtom, v => !v)} />
         </Box>
+        {conflict ? (
+          // Claude edited a file while the pane held unsaved typing for it
+          <Box key="conflict" flexDirection="column">
+            <Text wrap={wrapMode} color="warning">
+              {`⚠ Claude edited ${conflict.path.split(/[\\/]/).pop()} at ${new Date(conflict.at).toLocaleTimeString()} while you had unsaved typing for it here. Your typing is still in the editor, but Save is refused (the file changed): copy what you need, then reopen the file and put it back in.`}
+            </Text>
+            <Box flexDirection="row" gap={1} flexWrap="wrap">
+              <Button key="conflict-diff" label="± See Claude's change" onPress={() => void (async () => {
+                await update($, diffOpenAtom, list => (list.includes(`filediff:${conflict.path}`) ? list : [...list, `filediff:${conflict.path}`].slice(-50)))
+                await update($, diffBaseAtom, () => ({ path: conflict.path, base: 'claude' as const, edit: Number.MAX_SAFE_INTEGER }))
+              })()} />
+              <Button key="conflict-ok" label="Got it" onPress={() => void update($, conflictAtom, () => null)} />
+            </Box>
+          </Box>
+        ) : null}
         <Text key="version" wrap={wrapMode} dimColor>
           {`Files pane ${ver.version ? `v${ver.version}` : ''}${ver.at ? ` · deployed ${whenText(ver.at)}` : ' · run from its source folder'}`}
         </Text>
+        {health ? (
+          // which outside programs are there: a missing one says what it's needed for
+          <Text key="health" wrap={wrapMode} dimColor={health.every(h => h.ok)} color={health.every(h => h.ok) ? undefined : 'warning'}>
+            {`Tools: ${health.map(h => `${h.ok ? '✓' : '✗'} ${h.name}`).join(' · ')}${health.some(h => !h.ok) ? ` (missing: ${health.filter(h => !h.ok).map(h => `${h.name} for ${h.for}`).join('; ')})` : ''}`}
+          </Text>
+        ) : null}
         {ver.newer ? (
           <Text key="newer" wrap={wrapMode} color="warning">
             {`A newer pane was deployed ${whenText(ver.newer)}: new chats get it (this chat started without the folder watch, so it keeps the one it started with).`}
@@ -1855,6 +2099,7 @@ export const register: Register = on => {
         </Box>
       )
 
+    const recentNow = await read($, recentAtom)
     const header = (
       <Box flexDirection="column" gap={1}>
         {switcher}
@@ -1864,6 +2109,14 @@ export const register: Register = on => {
           <Text wrap={wrapMode}>{open ? open.path : dir}</Text>
         )}
         {message ? <Text wrap={wrapMode}>{message}</Text> : null}
+        {open && recentNow.length > 1 ? (
+          // the files opened lately, as tabs: one press back to any of them
+          <Box key="file-tabs" flexDirection="row" gap={1} flexWrap="wrap">
+            {recentNow.slice(0, 8).map((p, i) => (
+              <Button key={`ft:${i}`} label={`${kindOf(p)[0]} ${p.split(/[\\/]/).pop()}`} plain variant={p.toLowerCase() === open.path.toLowerCase() ? 'primary' : 'secondary'} onPress={() => void openPath(p)} />
+            ))}
+          </Box>
+        ) : null}
       </Box>
     )
 
@@ -1875,10 +2128,10 @@ export const register: Register = on => {
       const isPinned = pinnedNow.some(p => p.toLowerCase() === path.toLowerCase())
       return [
         <Button key="pin" onPress={() => void update($, pinnedAtom, list => (isPinned ? list.filter(p => p.toLowerCase() !== path.toLowerCase()) : [path, ...list].slice(0, 20)))}>
-          {isPinned ? '★ Unpin' : '☆ Pin'}
+          {isPinned ? (compact ? '★' : '★ Unpin') : compact ? '☆' : '☆ Pin'}
         </Button>,
         <Button key="copy" onPress={() => void $.ui.copy({ text: path, surface: e.surface }).then(() => say('Path copied.'))}>
-          📋 Copy path
+          {compact ? '📋' : '📋 Copy path'}
         </Button>,
         <Button key="vscode" onPress={() => void (async () => {
           // absolute only, so the path can't read as one of VS Code's options
@@ -1888,16 +2141,16 @@ export const register: Register = on => {
           const r = await $.process.run([code.exe, code.cli, path], { env: { ELECTRON_RUN_AS_NODE: '1', VSCODE_DEV: '' }, timeoutMs: 30_000 }).catch(() => null)
           await say(r?.exitCode === 0 ? 'Opened in VS Code.' : `VS Code didn't open it${r?.stderr ? `: ${r.stderr.split(/\r?\n/)[0]}` : '.'}`)
         })()}>
-          Open in VS Code
+          {compact ? 'VS Code' : 'Open in VS Code'}
         </Button>,
         <Button key="app" onPress={() => void $.process.run(['explorer.exe', path])}>
-          ↗ Its app
+          {compact ? '↗' : '↗ Its app'}
         </Button>,
         <Button key="note" onPress={() => void (async () => {
           typed.delete(`note:${path}`)
           await update($, noteOpenAtom, v => (v === path ? '' : path))
         })()}>
-          🗒 Note
+          {compact ? '🗒' : '🗒 Note'}
         </Button>,
       ]
     }
@@ -1908,7 +2161,7 @@ export const register: Register = on => {
           {header}
           <Box flexDirection="row" gap={1} flexWrap="wrap">
             <Button key="back" onPress={() => void goDir(parent(f.path))}>
-              ← Folder
+              {compact ? '←' : '← Folder'}
             </Button>
             {Input ? (
               <Button key="as-text" onPress={() => void (async () => {
@@ -1919,7 +2172,7 @@ export const register: Register = on => {
               </Button>
             ) : null}
             <Button key="reveal" onPress={() => void $.process.run(['explorer.exe', `/select,${f.path}`])}>
-              📂 Show in Explorer
+              {compact ? '📂' : '📂 Show in Explorer'}
             </Button>
             {fileTools(f.path)}
           </Box>
@@ -2020,7 +2273,7 @@ export const register: Register = on => {
           </Text>
           <Box flexDirection="row" gap={1} flexWrap="wrap">
             <Button key="back" onPress={() => void goDir(parent(f.path))}>
-              ← Folder
+              {compact ? '←' : '← Folder'}
             </Button>
             <Button key="diff" variant={showDiff.includes(diffKey) ? 'primary' : 'secondary'} onPress={() => void flipDiffFile(diffKey)}>
               ± Diff
@@ -2034,7 +2287,7 @@ export const register: Register = on => {
               </Button>
             ) : null}
             <Button key="reveal" onPress={() => void $.process.run(['explorer.exe', `/select,${f.path}`])}>
-              📂 Show in Explorer
+              {compact ? '📂' : '📂 Show in Explorer'}
             </Button>
             {shell ? <Button key="zoom" label={`🔍 Closer${zoom > 1 ? ` (${zoom}×)` : ''}`} variant={zoom > 1 ? 'primary' : 'secondary'} onPress={() => void update($, previewZoomAtom, z => (z >= 2 ? 1 : z === 1 ? 1.5 : 2))} /> : null}
             {fileTools(f.path)}
@@ -2182,10 +2435,10 @@ export const register: Register = on => {
           {header}
           <Box flexDirection="row" gap={1} flexWrap="wrap">
             <Button key="back" onPress={() => void goDir(parent(f.path))}>
-              ← Folder
+              {compact ? '←' : '← Folder'}
             </Button>
             <Button key="reveal" onPress={() => void $.process.run(['explorer.exe', `/select,${f.path}`])}>
-              📂 Show in Explorer
+              {compact ? '📂' : '📂 Show in Explorer'}
             </Button>
             {fileTools(f.path)}
           </Box>
@@ -2338,7 +2591,7 @@ export const register: Register = on => {
       const pickedBackup = fileBackups.find(b => b.backup === ours?.backup) ?? fileBackups[0]
       // two backups against each other: `versus` instead of the file now
       const versusBackup = ours?.versus ? fileBackups.find(b => b.backup === ours.versus && b.backup !== pickedBackup?.backup) : undefined
-      const claudeStep = ours?.edit !== undefined && ours.edit < claudeSteps.length ? ours.edit : 0
+      const claudeStep = ours?.edit !== undefined && claudeSteps.length ? Math.min(ours.edit, claudeSteps.length - 1) : 0
       // another file: the one opened before this (open it, then this one, to compare the two)
       const otherFile = ours?.other ?? (await read($, recentAtom)).find(p => p.toLowerCase() !== f.path.toLowerCase())
       const base = ours && (ours.base !== 'backup' || pickedBackup) && (ours.base !== 'claude' || claudeBefore !== undefined) && (ours.base !== 'other' || otherFile) ? ours.base : 'commit'
@@ -2391,7 +2644,7 @@ export const register: Register = on => {
           </Text>
           <Box flexDirection="row" gap={1} flexWrap="wrap">
             <Button key="back" onPress={() => void goDir(parent(f.path))}>
-              ← Folder
+              {compact ? '←' : '← Folder'}
             </Button>
             {!f.binary && Input && (
               <Button key="save" variant="primary" onPress={() => void save(f)}>
@@ -2414,7 +2667,7 @@ export const register: Register = on => {
               </Button>
             ) : null}
             <Button key="reveal" onPress={() => void $.process.run(['explorer.exe', `/select,${f.path}`])}>
-              📂 Show in Explorer
+              {compact ? '📂' : '📂 Show in Explorer'}
             </Button>
             {fileTools(f.path)}
             <Button key="diff" variant={showDiff.includes(diffKey) ? 'primary' : 'secondary'} onPress={() => void flipDiffFile(diffKey)}>
@@ -2508,7 +2761,7 @@ export const register: Register = on => {
       )
     }
 
-    let entries: { name: string; kind: string; size: number }[] = []
+    let entries: { name: string; kind: string; size: number; mtimeMs?: number }[] = []
     let listError = ''
     try {
       step('listing the folder')
@@ -2516,7 +2769,22 @@ export const register: Register = on => {
     } catch (err) {
       listError = err instanceof Error ? err.message : String(err)
     }
-    entries.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1))
+    // sorted by name (folders first), size or modified time (biggest / newest first); narrowed by 🔎
+    const sortBy = await read($, sortAtom)
+    const folderFind = (await read($, folderFindAtom)).trim().toLowerCase()
+    const total = entries.length
+    if (folderFind) entries = entries.filter(x => x.name.toLowerCase().includes(folderFind))
+    entries.sort((a, b) =>
+      sortBy === 'size' ? b.size - a.size || a.name.localeCompare(b.name) : sortBy === 'date' ? (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0) : a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1,
+    )
+    // the folder's path, each part a button to go there
+    const crumbs: { label: string; path: string }[] = []
+    for (let p = dir, i = 0; p && i < 40; i++) {
+      const up = parent(p)
+      crumbs.unshift({ label: up === p ? p.replace(/[\\/]+$/, '') : p.slice(Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/')) + 1), path: p })
+      if (up === p) break
+      p = up
+    }
     step('reading pinned files')
     const pinned = await read($, pinnedAtom)
     const recent = await read($, recentAtom)
@@ -2542,14 +2810,33 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" gap={1}>
         {header}
-        <Box flexDirection="row" gap={1}>
-          <Button key="up" onPress={() => void goDir(parent(dir))}>
-            ↑ Up
-          </Button>
-          <Text wrap={wrapMode} dimColor>
-            {listError ? `Can't list it: ${listError}` : `${entries.length} item${entries.length === 1 ? '' : 's'}`}
-          </Text>
+        <Box key="crumbs" flexDirection="row" gap={0} flexWrap="wrap">
+          {crumbs.flatMap((c, i) => [
+            ...(i > 0 ? [<Text key={`bcs${i}`} dimColor>{' › '}</Text>] : []),
+            <Button key={`bc:${i}`} label={c.label} plain variant={i === crumbs.length - 1 ? 'primary' : 'secondary'} onPress={() => void goDir(c.path)} />,
+          ])}
         </Box>
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          <Button key="up" label={compact ? '↑' : '↑ Up'} onPress={() => void goDir(parent(dir))} />
+          <Text wrap={wrapMode} dimColor>
+            {listError ? `Can't list it: ${listError}` : folderFind ? `${entries.length} of ${total} match "${folderFind}"` : `${total} item${total === 1 ? '' : 's'}`}
+          </Text>
+          <Text dimColor>Sort:</Text>
+          {(['name', 'size', 'date'] as const).map(s => (
+            <Button key={`sort:${s}`} label={s === 'name' ? 'Name' : s === 'size' ? 'Size' : 'Date'} variant={sortBy === s ? 'primary' : 'secondary'} onPress={() => void update($, sortAtom, () => s)} />
+          ))}
+          {folderFind ? <Button key="find-clear" label="✕ All" onPress={() => void update($, folderFindAtom, () => '')} /> : null}
+        </Box>
+        {Input ? (
+          <Input
+            key="folder-find"
+            label="🔎"
+            placeholder="Find in this folder by part of a name (Enter)"
+            value={folderFind}
+            submitLabel="find"
+            onSubmit={(v: string) => void update($, folderFindAtom, () => v)}
+          />
+        ) : null}
         {pinned.length || recent.length ? (
           <Box flexDirection="column">
             {pinned.length ? <Text wrap={wrapMode} dimColor>Pinned</Text> : null}
@@ -2569,9 +2856,6 @@ export const register: Register = on => {
                   <Text wrap={wrapMode} dimColor>{parent(p)}</Text>
                 </Box>
               ))}
-            <Text wrap={wrapMode} dimColor>
-              {dir}
-            </Text>
           </Box>
         ) : null}
         <Box flexDirection="column">
@@ -2582,6 +2866,7 @@ export const register: Register = on => {
               <Box key={`row:${x.name}`} flexDirection="row" gap={1}>
                 <Button key={`e:${x.name}`} label={`${icon} ${x.name}`} plain onPress={() => void (x.kind === 'dir' ? goDir(join(dir, x.name)) : openPath(join(dir, x.name)))} />
                 {x.kind === 'file' ? <Text wrap={wrapMode} dimColor>{sizeText(x.size)}</Text> : null}
+                {x.mtimeMs && !compact ? <Text wrap={wrapMode} dimColor>{new Date(x.mtimeMs).toLocaleDateString()}</Text> : null}
                 {g ? <Text wrap={wrapMode} color={GIT_COLOR[g]}>● {g}</Text> : color && x.kind === 'file' ? <Text wrap={wrapMode} color={color}>●</Text> : null}
               </Box>
             )

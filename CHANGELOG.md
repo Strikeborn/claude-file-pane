@@ -4,6 +4,18 @@ Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
 ## Unreleased
 
+## 0.4.2 (not deployed yet)
+- Faster: the Node helper is a file (`hooks/helper.cjs`), not `node -e` with 30 KB of code; Windows took ~2.7 s to
+  start each call that way, a file ~0.1 s. Every save, backup, preview-cache read and binary view gets quicker.
+- 👁 Follow Claude: each file Claude edits opens with that edit's diff. A file open in the pane reloads when Claude
+  edits it; with unsaved typing for it, a warning in the pane and the band instead.
+- Claude's tools: `show` (a file, with its diff or one line pointed at), `backups`, `notes`. `/files <tab | path>`.
+- A Tools line (Node, git, javap, ILSpy, Heimdall3D: found or not, and what a missing one is for).
+- Folders: breadcrumbs, sort by name / size / date, 🔎 find, dates beside files; recent files as tabs; # Line
+  numbers in diffs; ▤ Compact labels.
+- Checks: `tests/helper.check.mjs` runs the helper on real samples (in `deploy.mjs --check`). GitHub: a pre-push check
+  for personal data and keys, and a tag + release per deploy.
+
 ## 0.4.1 (deployed 2026-11-03 17:47)
 - A jar / zip's ± Diff: each added / removed / changed file is a button for its own diff (a class by javap, text as
   text, anything else as readable text and hex), from the last commit's copy and the file now, nothing unpacked to disk.

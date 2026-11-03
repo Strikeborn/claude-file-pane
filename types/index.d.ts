@@ -101,6 +101,18 @@ declare module 'claude-code' {
       /** A binary file's view: what it is (info), its readable text, its bytes, the files in a zip / jar, a class's
        * bytecode (java), or its diff against the last commit; `at` the byte a text / hex page starts at. */
       binView: BinView;
+      /** Diffs show each line's number in the old and new file. */
+      diffLineNumbers: boolean;
+      /** Compact: shorter button labels, for a narrow pane. */
+      compact: boolean;
+      /** How a folder lists: by name (folders first), size or modified time (newest first). */
+      sortBy: 'name' | 'size' | 'date';
+      /** A folder list narrowed to names holding this text ('': all). */
+      folderFind: string;
+      /** 👁 Follow Claude: each file Claude edits opens in the pane with that edit's diff. */
+      followClaude: boolean;
+      /** Claude edited a file while the pane held unsaved typing for it (`at` when), or null. */
+      conflict: { path: string; at: number } | null;
       /** 🗂 Files inside a big zip: the part of a name looked for (`path` the zip it's for). */
       zipFilter: { path: string; text: string };
       /** A zip / jar's ± Diff: the file inside it whose own diff is shown (`path` the zip). */
@@ -116,6 +128,24 @@ declare module 'claude-code' {
   // the pane's own tools, until the engine's generated list (.claude-plugin/types/claude-code-mcp) has them: same
   // shape as its inputSchema, so the two merge once it does
   interface McpToolInputs {
+    "mcp__file-pane__show": {
+      /** The file to show (absolute) */
+      path: string
+      /** Show its diff against this */
+      diff?: "commit" | "claude" | "backup"
+      /** Point at this line (1-based): the pane says what it reads */
+      line?: number
+    }
+    "mcp__file-pane__backups": {
+      /** Only copies of this file, or of files under this folder (absolute) */
+      path?: string
+      /** At most this many (default 20, at most 200) */
+      limit?: number
+    }
+    "mcp__file-pane__notes": {
+      /** Only this file, or files under this folder (absolute) */
+      path?: string
+    }
     "mcp__file-pane__ticks": {
       /** Only this file, or files under this folder (absolute) */
       path?: string

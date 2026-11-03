@@ -86,14 +86,44 @@ export function splitBoxes(raw: string): string[] {
   return out
 }
 
-/** A unified diff as rows of two columns: removed lines on the left, added on the right, context on both. */
-export type SideRow = { left?: string; right?: string; kind: 'same' | 'change' | 'hunk' | 'meta' }
+/** A unified diff's lines in one column, each with its line number in the old and the new file (from the hunks). */
+export type NumberedLine = { text: string; kind: 'add' | 'del' | 'same' | 'hunk' | 'meta'; oldNo?: number; newNo?: number }
+export function numberedDiff(diff: string): NumberedLine[] {
+  const out: NumberedLine[] = []
+  let oldNo = 0
+  let newNo = 0
+  let inHunk = false
+  for (const l of diff.split(/\r?\n/)) {
+    const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(l)
+    if (m) {
+      inHunk = true
+      oldNo = Number(m[1])
+      newNo = Number(m[2])
+      out.push({ text: l, kind: 'hunk' })
+    } else if (!inHunk || l.startsWith('diff --git')) {
+      inHunk = false
+      if (l && !/^(index |--- |\+\+\+ )/.test(l)) out.push({ text: l, kind: 'meta' })
+    } else if (l.startsWith('-')) out.push({ text: l, kind: 'del', oldNo: oldNo++ })
+    else if (l.startsWith('+')) out.push({ text: l, kind: 'add', newNo: newNo++ })
+    else if (l.startsWith(' ')) out.push({ text: l, kind: 'same', oldNo: oldNo++, newNo: newNo++ })
+  }
+  return out
+}
+
+/**
+ * A unified diff as rows of two columns: removed lines on the left, added on the right, context on both, each with
+ * its line number in the old (`leftNo`) and new (`rightNo`) file, counted from the hunk headers.
+ */
+export type SideRow = { left?: string; right?: string; kind: 'same' | 'change' | 'hunk' | 'meta'; leftNo?: number; rightNo?: number }
 export function sideBySide(diff: string): SideRow[] {
   const rows: SideRow[] = []
   let dels: string[] = []
   let adds: string[] = []
+  let oldNo = 0
+  let newNo = 0
   const flush = () => {
-    for (let i = 0; i < Math.max(dels.length, adds.length); i++) rows.push({ left: dels[i], right: adds[i], kind: 'change' })
+    for (let i = 0; i < Math.max(dels.length, adds.length); i++)
+      rows.push({ left: dels[i], right: adds[i], kind: 'change', ...(i < dels.length ? { leftNo: oldNo++ } : {}), ...(i < adds.length ? { rightNo: newNo++ } : {}) })
     dels = []
     adds = []
   }
@@ -102,6 +132,9 @@ export function sideBySide(diff: string): SideRow[] {
     if (l.startsWith('@@')) {
       flush()
       inHunk = true
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(l)
+      oldNo = m ? Number(m[1]) : 0
+      newNo = m ? Number(m[2]) : 0
       rows.push({ left: l, kind: 'hunk' })
     } else if (!inHunk) {
       if (/^(diff --git|new file|deleted file|Binary files)/.test(l)) rows.push({ left: l, kind: 'meta' })
@@ -109,7 +142,7 @@ export function sideBySide(diff: string): SideRow[] {
     else if (l.startsWith('+')) adds.push(l.slice(1))
     else if (l.startsWith(' ') || l === '') {
       flush()
-      rows.push({ left: l.slice(1), right: l.slice(1), kind: 'same' })
+      rows.push({ left: l.slice(1), right: l.slice(1), kind: 'same', leftNo: oldNo++, rightNo: newNo++ })
     } else if (l.startsWith('diff --git')) {
       flush()
       inHunk = false

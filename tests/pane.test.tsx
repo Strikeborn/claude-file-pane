@@ -656,3 +656,129 @@ test('diffs: Claude\'s change, vs backup / commit, ignore spaces, word highlight
   expect(lastDiff().slice(-3)).toEqual(['--', `${DIR}\\notes.ts`, FILE])
   await ui.unmount()
 })
+
+// 👁 Follow Claude, the conflict warning, Claude's show / backups / notes tools, /files <tab | path>, the tools line,
+// breadcrumbs, folder sort and find, file tabs, # Line numbers and ▤ Compact.
+test('follow Claude, conflicts, agent tools, /files, tools line, folder and diff UI', async ($, on) => {
+  const DIR = 'F:\\work'
+  const A = `${DIR}\\a.ts`
+  const B = `${DIR}\\b.ts`
+  const files = new Map<string, string>([
+    [A, 'one\n'],
+    [B, 'x\n'],
+  ])
+  const runs: (readonly string[])[] = []
+  const store = new Map<string, unknown>([['notes', { [A]: { text: 'careful: generated', at: 5 } }]])
+  on('command.register', () => ({ value: { command: 'files' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__file-pane__open' } }))
+  // Claude's Edit: the file changes on disk (the pane's Edit hook sits above this)
+  on('tool.call', (_, e) => {
+    if (e.tool === 'Edit' && e.file_path === A) files.set(A, `${files.get(A)}edited\n`)
+    return { result: 'edited', text: 'edited' }
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: DIR }))
+  on('env.get', () => ({ value: 'C:\\Users\\tester' }))
+  on('fs.list', (_, e) => ({
+    value:
+      String(e.path ?? '') === DIR
+        ? [
+            { name: 'a.ts', kind: 'file', size: 4, mtimeMs: 100, isLink: false },
+            { name: 'big.log', kind: 'file', size: 900, mtimeMs: 50, isLink: false },
+            { name: 'b.ts', kind: 'file', size: 2, mtimeMs: 300, isLink: false },
+            { name: 'src', kind: 'dir', size: 0, mtimeMs: 10, isLink: false },
+          ]
+        : [],
+  }))
+  on('fs.exists', (_, e) => ({ value: /heimdall_probe\.exe$/i.test(String(e.path)) }))
+  on('fs.stat', (_, e) => {
+    const t = files.get(String(e.path))
+    return { value: t !== undefined ? { kind: 'file', size: t.length, mtimeMs: t.length, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }
+  })
+  on('fs.read', (_, e) => {
+    const t = files.get(String(e.path))
+    if (t === undefined) throw new Error('ENOENT')
+    return { value: t }
+  })
+  on('store.get', (_, e) => ({ value: store.get(String(e.key)) }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    runs.push(e.argv)
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    const [exe, , , cmd] = e.argv
+    if (exe === 'node' && e.argv[1] === '--version') return out('v24.0.0\n')
+    if (exe === 'node' && cmd === 'backup') return out(JSON.stringify({ ok: true, backup: `C:\\Users\\tester\\.claude\\file-pane-backups\\b${runs.length}-a.ts` }))
+    if (exe === 'git' && e.argv.includes('diff')) return out('@@ -3,2 +3,2 @@\n ctx\n-old\n+new\n', e.argv.includes('--no-index') ? 1 : 0)
+    return out('', 128)
+  })
+  const shows = async (re: RegExp) => {
+    for (let i = 0; i < 20 && !(await ui.find({ text: re })); i++) await ui.drawn()
+    const found = await ui.find({ text: re })
+    if (!found) throw new Error(`nothing shows ${re}`)
+    return found
+  }
+
+  await $.session.start({ cwd: DIR, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // the tools line: found ones ticked, a missing one says what it's for
+  expect(await shows(/^Tools: ✓ Node · ✗ git · ✗ javap · ✗ ILSpy · ✓ Heimdall3D \(missing: git for diffs/)).toBeDefined()
+
+  // breadcrumbs, sort, find in the folder
+  expect((await ui.find({ key: 'bc:0' }))?.text).toBe('F:')
+  expect((await ui.find({ key: 'bc:1' }))?.text).toBe('work')
+  await ui.press({ key: 'sort:date' })
+  expect((await ui.find({ key: 'sort:date' }))?.props.variant).toBe('primary')
+  await ui.input({ key: 'folder-find', text: 'b.' })
+  expect(await shows(/^1 of 4 match "b\."$/)).toBeDefined()
+  expect(await ui.find({ key: 'e:a.ts' })).toBeUndefined()
+  expect(await ui.find({ key: 'e:b.ts' })).toBeDefined()
+  await ui.press({ key: 'find-clear' })
+  expect(await ui.find({ key: 'e:a.ts' })).toBeDefined()
+
+  // 👁 Follow Claude: an edit opens the file with that edit's diff
+  await ui.press({ key: 'follow' })
+  await $.tool.call({ tool: 'Edit', file_path: A, old_string: 'one', new_string: 'one' })
+  expect(await shows(/Compared with the file before Claude's first edit/)).toBeDefined()
+  expect(runs.some(r => r[0] === 'git' && r.includes('--no-index') && r.at(-1) === A)).toBe(true)
+  // # Line numbers: each diff line with its old and new line number
+  await ui.press({ key: 'linenos' })
+  expect(await shows(/^ {4}3 {5}3 {2}ctx$/)).toBeDefined()
+  expect(await shows(/^ {4}4 {7}-old$/)).toBeDefined()
+  await ui.press({ key: 'linenos' })
+
+  // a conflict: typing kept in the editor, then Claude edits the same file: a warning, and the typing stays
+  await ui.input({ key: `edit:${A}|0`, text: 'mine\n' })
+  await $.tool.call({ tool: 'Edit', file_path: A, old_string: 'edited', new_string: 'edited' })
+  expect(await shows(/^⚠ Claude edited a\.ts at .* while you had unsaved typing for it here/)).toBeDefined()
+  await ui.press({ key: 'conflict-ok' })
+  for (let i = 0; i < 20 && (await ui.find({ key: 'conflict-ok' })); i++) await ui.drawn()
+  expect(await ui.find({ key: 'conflict-ok' })).toBeUndefined()
+
+  // Claude's tools: show a file with its diff and one line; its backups; the person's notes
+  const shown = await $.tool.call({ tool: 'mcp__file-pane__show', path: B, diff: 'commit', line: 1 })
+  expect(JSON.stringify(shown)).toContain('Pointed at line 1')
+  expect(await shows(/^Claude points at line 1: x$/)).toBeDefined()
+  expect(await shows(/Compared with the last commit/)).toBeDefined()
+  const backups = await $.tool.call({ tool: 'mcp__file-pane__backups', path: DIR })
+  expect(JSON.stringify(backups)).toContain("before one of Claude's edits")
+  const notes = await $.tool.call({ tool: 'mcp__file-pane__notes', path: DIR })
+  expect(JSON.stringify(notes)).toContain('careful: generated')
+
+  // the files opened lately as tabs
+  expect((await ui.find({ key: 'ft:0' }))?.text).toMatch(/b\.ts$/)
+  expect((await ui.find({ key: 'ft:1' }))?.text).toMatch(/a\.ts$/)
+
+  // ▤ Compact: shorter labels
+  await ui.press({ key: 'compact' })
+  expect((await ui.find({ key: 'wrap' }))?.text).toBe('↩')
+  await ui.press({ key: 'compact' })
+
+  // /files ticks opens that Project tab; /files <path> opens a file (typed at the prompt)
+  const RUN = { origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 120 } }
+  expect(JSON.stringify(await $.command.run({ command: 'files', args: 'ticks', ...RUN }))).toContain('Project → ticks')
+  expect(JSON.stringify(await $.command.run({ command: 'files', args: 'a.ts', ...RUN }))).toContain(`Opened ${A.replace(/\\/g, '\\\\')}`)
+  await ui.unmount()
+})

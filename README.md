@@ -3,13 +3,26 @@
 A pane beside the Claude Code chat for browsing folders, reading and editing files, and keeping an eye on the project
 the chat is working in. It's a Claude Code mod (hooks module), not an MCP server or an app.
 
-Plugin name: `file-pane` · version 0.4.1 · open it with `/files` (or Claude can open it on a file with the
-`mcp__file-pane__open` tool; `mcp__file-pane__ticks` lists the checkboxes ticked through it).
+Plugin name: `file-pane` · version 0.4.2 · open it with `/files`, `/files <project tab>` (`/files ticks`, `changes`,
+`git`…) or `/files <path>`.
+
+Claude's tools: `mcp__file-pane__open` (the pane at a folder or file), `show` (a file with its diff or one line
+pointed at), `backups` (a file's backup copies), `notes` (your per-file notes), `ticks` (the checkboxes ticked
+through the pane).
 
 ## What it does
 
 **Files**
-- Browse folders (the session's folder by default, any path typed in), pinned and recent files.
+- Browse folders (the session's folder by default, any path typed in), pinned and recent files. The folder's path is
+  a row of buttons (any part goes there); sort by name, size or date; 🔎 finds entries by part of their name; each
+  file shows its size and date.
+- The files opened lately are tabs above an open file.
+- **👁 Follow Claude** (beside Wrap): each file Claude edits opens in the pane with that edit's diff. Without it, a file
+  open in the pane reloads when Claude edits it. When you have unsaved typing for a file and Claude edits it, the pane
+  and the band warn you (your typing stays in the editor; Save is refused because the file changed).
+- **▤ Compact**: shorter button labels for a narrow pane.
+- A **Tools** line under the version: which outside programs are there (Node, git, javap, ILSpy, Heimdall3D) and
+  what a missing one is needed for.
 - Open text files whole, or page by page when they're big (a log or config of any size: pages cut at a line end, so
   neither the 4 MiB read limit nor the pane's drawing limit stops it).
 - Edit and save. **Every save backs the file up first** (`~/.claude/file-pane-backups`) and is refused when the file
@@ -52,7 +65,8 @@ Plugin name: `file-pane` · version 0.4.1 · open it with `/files` (or Claude ca
   (the engine's field has no setting), so with Wrap off an open file reads as numbered code, one row a line, and
   ✎ Edit turns Wrap back on. Markdown documents always wrap (the engine's Markdown has no setting either).
 - ± Diff of a file, one column or ⇆ side by side (there, the words that changed inside a line are highlighted), with
-  **␣ Ignore spaces** (spaces, tabs, line endings, blank lines). A text file compares with **the last commit**, its
+  **␣ Ignore spaces** (spaces, tabs, line endings, blank lines) and **# Line numbers** (each line's number in the old and
+  new file). A text file compares with **the last commit**, its
   **backups** (the newest, or any of the newest 8, against the file now or against another backup), **the file opened
   before it** (open one, then the other, and press "vs <name>"), or **the file before Claude's edits**: before each of
   Claude's Edit / Write calls on a file the pane copies it to the backups folder, so Changes has **± Claude's change**
@@ -98,14 +112,20 @@ Plugin name: `file-pane` · version 0.4.1 · open it with `/files` (or Claude ca
 |---|---|
 | `.claude-plugin/plugin.json` | manifest (name, version, description, `types`) |
 | `hooks/hooks.json` | `{ "modules": ["./register.tsx"] }` |
-| `hooks/register.tsx` | the whole mod: hooks, the pane, the band, the `/files` command, the `open` tool, the Node helper |
+| `hooks/register.tsx` | the mod: hooks, the pane, the band, the `/files` command, Claude's tools |
+| `hooks/helper.cjs` | the Node helper (paging, backups, saves, binaries, zips, javap, ILSpy, Heimdall's probe), run as `node -- helper.cjs <command> …`: a file, because Windows took ~2.7 s to start `node -e` with 30 KB of code |
+| `hooks/scripts.ts` | the PowerShell scripts (Windows imaging, the shell thumbnail) |
 | `hooks/project.tsx` | pure parsers: markdown sections and tasks, heading paths, several-boxes lines and their split, side-by-side diff, commits, releases, features, building blocks |
 | `types/index.d.ts` | the mod's `$.state` contract (`file-pane.*` keys) and its value types |
-| `tests/pane.test.tsx` | checklists (counts, a tick logged and undone, the ticks tool, Only open, Edit mode, Split, Done dates, the Ticks tab) and the version line; presses every project tab and opens a file and a .md, in a non-git folder; flips ↩ Wrap through every view and draws a side-by-side diff both ways; opens a DLL in Info, Readable text, Hex and C# (ILSpy), a jar's file list (a file opened from it), its diff (which files changed), a class's javap and bytecode diff (and the debug-info diff when the bytecode is the same), a DLL's C# diff; checks that VS Code and the temp-file removal run without cmd.exe, that a model previews through the shell thumbnail (and a refused thumbnail maker says why), and a .glb through Heimdall's probe; Claude's change (copy before its Edit, ± Claude's change, Put back), vs backup (any of them) / commit / the file opened before, Ignore spaces, word highlights |
+| `tests/pane.test.tsx` | checklists (counts, a tick logged and undone, the ticks tool, Only open, Edit mode, Split, Done dates, the Ticks tab) and the version line; presses every project tab and opens a file and a .md, in a non-git folder; flips ↩ Wrap through every view and draws a side-by-side diff both ways; opens a DLL in Info, Readable text, Hex and C# (ILSpy), a jar's file list (a file opened from it), its diff (which files changed), a class's javap and bytecode diff (and the debug-info diff when the bytecode is the same), a DLL's C# diff; checks that VS Code and the temp-file removal run without cmd.exe, that a model previews through the shell thumbnail (and a refused thumbnail maker says why), and a .glb through Heimdall's probe; Claude's change (copy before its Edit, ± Claude's change, Put back), vs backup (any of them) / commit / the file opened before, Ignore spaces, word highlights; Follow Claude, the conflict warning, the show / backups / notes tools, `/files <tab | path>`, the Tools line, breadcrumbs, sort and find, file tabs, line numbers, Compact |
+| `tests/helper.check.mjs` | the helper run for real on `samples/` (text, backups, rmtemp's limits, PE / zip / class info, zip entries and zip-slip names, a damaged zip, jar diffs, javap, the preview cache, Heimdall's probe; ILSpy with `FILE_PANE_SLOW=1`) |
+| `samples/java/` | two versions of a small jar and class for the helper test |
+| `scripts/prepush-check.mjs`, `.githooks/pre-push` | refuses a push carrying this machine's user name, home folder, a personal email or a key-shaped string |
+| `scripts/release.mjs` | a git tag and GitHub release for the version (deploy runs it when all is committed) |
 | `CHANGELOG.md` | what changed, by version |
 | `samples/make-test-glb.mjs` → `samples/star-test.glb` | a test model for previews: a yellow star (material color), a red / blue checker plate (an embedded PNG texture) and a green cube |
 | `tsconfig.json` | extends `.claude-plugin/types/tsconfig.json` (written by the engine when it loads the mod) |
-| `deploy.mjs` | checks, then copies the mod into the folder every chat loads (not deployed itself), and writes its `deployed.json` stamp (version, time) |
+| `deploy.mjs` | checks, then copies the mod into the folder every chat loads (not deployed itself), writes its `deployed.json` stamp (version, time), then tags and releases the version (`--no-release` skips that) |
 
 ## Working on it, and putting a change live
 
@@ -116,7 +136,7 @@ This folder is the source. Every chat loads a deployed copy, `~/.claude/mods/fil
 node deploy.mjs
 ```
 
-It runs the three checks below, backs up the loaded copy to `~/.claude/file-pane-backups/deploy-<time>`, and copies the
+It runs the four checks below, backs up the loaded copy to `~/.claude/file-pane-backups/deploy-<time>`, and copies the
 mod's files over (`.claude-plugin/plugin.json`, `hooks/`, `types/`, `tests/`, `tsconfig.json`, the docs). New chats
 load it. Open chats reload it too when they were started with `"CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"` in the `env` of
 `~/.claude/settings.json` (set 2026-11-03): desktop-app chats only watch a `CLAUDE_CODE_PLUGIN_DIRS` folder with it.
@@ -134,9 +154,17 @@ Node must be on PATH for paging, backups and saves of a page (a small Node helpe
 claude plugin validate .
 npx -p typescript tsc -p . --noEmit
 claude plugin test .
+node --test tests/helper.check.mjs
 ```
 
-`validate` and the typecheck alone have missed real breakage (a blank pane, refused elements); always run the test.
+`validate` and the typecheck alone have missed real breakage (a blank pane, refused elements); always run the tests.
+The pane test answers every program call itself; the helper test is where the helper meets real files.
+
+## GitHub
+
+Private repository `Strikeborn/claude-file-pane`. In a fresh clone, turn the pre-push check on once:
+`git config core.hooksPath .githooks`. Each deploy (when everything is committed) tags `v<version>` and makes a GitHub
+release with that version's CHANGELOG section.
 
 More: `CLAUDE.md` (engine rules learned the hard way), `SECURITY.md` (what it can do, protections, findings),
 `IDEAS.md` (plans), `NEXT_CHAT.md` (brief for the next agent, local or cloud).
