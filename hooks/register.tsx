@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BinView, Change, CheckResult, DiffBase, OpenFile, Tick } from '../types'
-import { DONE_DATE, NEXT_HEADING, blocksFrom, boxesIn, commitsFrom, featuresFrom, flipTask, headingPath, markDone, numberedDiff, releasesFrom, sections, sideBySide, splitBoxes, tasks, wordDiff } from './project'
-import type { Block, Task, TimelineEntry } from './project'
+import type { BinView, Change, ProjectTab, CheckResult, DiffBase, GitList, OpenFile, Tick } from '../types'
+import { DONE_DATE, NEXT_HEADING, age, ageTone, blameRuns, blocksFrom, boxesIn, branchesFrom, commitsFrom, featuresFrom, flipTask, headingPath, graphRows, lastCommitByFile, logFrom, markDone, numberedDiff, releasesFrom, sections, sideBySide, splitBoxes, tasks, wordDiff } from './project'
+import type { Block, GraphRow, Task, TimelineEntry } from './project'
 import { SHELL_THUMB_PS, THUMB_PS } from './scripts'
 import type { EngineInterface } from 'claude-code'
 
@@ -17,16 +17,20 @@ import type { EngineInterface } from 'claude-code'
  */
 
 const PANE = 'file-pane'
+// three windows, each its own pane (a tab in the dock): Files, Git, Project (Strike, 2026-11-11)
+const GIT_PANE = 'file-pane-git'
+const PROJECT_PANE = 'file-pane-project'
+const PANE_TITLES: Record<string, string> = { [PANE]: 'Files', [GIT_PANE]: 'Git', [PROJECT_PANE]: 'Project' }
 const PAGE = 60_000
-const LIST = 200
+// a folder draws this many rows a page (a list that grows hung the desktop pane: CLAUDE.md)
+const LIST = 80
 
 const dirAtom = atom({ plugin: 'file-pane', key: 'dir' } as const, '')
 const openAtom = atom({ plugin: 'file-pane', key: 'open' } as const, null)
 const msgAtom = atom({ plugin: 'file-pane', key: 'message' } as const, '')
-const shownAtom = atom({ plugin: 'file-pane', key: 'shown' } as const, LIST)
+const shownAtom = atom({ plugin: 'file-pane', key: 'shown' } as const, 0)
 const backupAtom = atom({ plugin: 'file-pane', key: 'lastBackup' } as const, '')
-const viewAtom = atom({ plugin: 'file-pane', key: 'view' } as const, 'files')
-const tabAtom = atom({ plugin: 'file-pane', key: 'projectTab' } as const, 'items')
+const tabAtom = atom({ plugin: 'file-pane', key: 'projectTab' } as const, 'overview' as ProjectTab)
 const allAtom = atom({ plugin: 'file-pane', key: 'itemsAll' } as const, false)
 const toggledAtom = atom({ plugin: 'file-pane', key: 'toggled' } as const, [])
 const asTextAtom = atom({ plugin: 'file-pane', key: 'mdAsText' } as const, false)
@@ -35,6 +39,28 @@ const changesAtom = atom({ plugin: 'file-pane', key: 'changes' } as const, [] as
 const runningAtom = atom({ plugin: 'file-pane', key: 'running' } as const, '')
 const resultsAtom = atom({ plugin: 'file-pane', key: 'results' } as const, {} as Record<string, CheckResult>)
 const diffOpenAtom = atom({ plugin: 'file-pane', key: 'diffOpen' } as const, [] as string[])
+// Changes / Git draw at most this many rows (files and folders) at once: 347 files in one repo (~720 buttons) hung
+// the desktop pane, and so did 180 after ⤓ Show more; a list is paged, a folder tree stops with a note
+const CHANGES_PAGE = 50
+const gitListAtom = atom({ plugin: 'file-pane', key: 'gitList' } as const, { find: '', kind: 'all', sort: 'path', folders: true, open: [], page: 0 } as GitList)
+// line counts of new (untracked) files, by repo: recounted when the status changes or after 15 s
+const newLines = new Map<string, { key: string; at: number; counts: Record<string, number> }>()
+// git's numstat (0.4 s in a big repo), by repo: kept 5 s while the status is the same, so presses stay quick
+const numstats = new Map<string, { key: string; at: number; text: string }>()
+// folder sizes (lower-case path → total bytes, file count, cut short), worked out in the background by the helper's
+// dirsizes and kept 5 minutes; dirSizing: a count is running (one at a time)
+const dirSizes = new Map<string, { bytes: number; files: number; partial: boolean; at: number }>()
+let dirSizing = false
+// git's answers by repo + question, newest 300 kept; gitAsking: the questions being asked again right now
+const gitCache = new Map<string, { at: number; out: string }>()
+const gitAsking = new Set<string>()
+function keepGit(k: string, out: string): void {
+  gitCache.delete(k)
+  gitCache.set(k, { at: Date.now(), out })
+  if (gitCache.size > 300) gitCache.delete(gitCache.keys().next().value!)
+}
+// Git dates by repo: each changed file's time on disk and its newest commit, kept 15 s while the status is the same
+const gitDates = new Map<string, { key: string; at: number; disk: Map<string, number>; committed: Map<string, number> }>()
 const bandHiddenAtom = atom({ plugin: 'file-pane', key: 'bandHidden' } as const, false)
 const pinnedAtom = atom({ plugin: 'file-pane', key: 'pinned' } as const, [] as string[])
 const recentAtom = atom({ plugin: 'file-pane', key: 'recent' } as const, [] as string[])
@@ -54,7 +80,14 @@ const lineNosAtom = atom({ plugin: 'file-pane', key: 'diffLineNumbers' } as cons
 const compactAtom = atom({ plugin: 'file-pane', key: 'compact' } as const, false)
 const sortAtom = atom({ plugin: 'file-pane', key: 'sortBy' } as const, 'name' as 'name' | 'size' | 'date')
 const folderFindAtom = atom({ plugin: 'file-pane', key: 'folderFind' } as const, '')
-const followAtom = atom({ plugin: 'file-pane', key: 'followClaude' } as const, false)
+// which page the one pane shows: Files, Git or Project (switched in place by the bar's first row: Strike, 2026-11-11)
+const viewAtom = atom({ plugin: 'file-pane', key: 'view' } as const, 'files' as 'files' | 'git' | 'project')
+// the folder tree's open folders (lower-case paths), newest 1,000: ⊞ Open all adds each one, so any can fold again
+const treeOpenAtom = atom({ plugin: 'file-pane', key: 'treeOpen' } as const, [] as string[])
+const navAtom = atom({ plugin: 'file-pane', key: 'nav' } as const, { back: [] as string[], fwd: [] as string[] })
+const menuAtom = atom({ plugin: 'file-pane', key: 'menu' } as const, false)
+const fileHistAtom = atom({ plugin: 'file-pane', key: 'fileHist' } as const, null as { path: string; mode: 'log' | 'blame' } | null)
+const agentReadAtom = atom({ plugin: 'file-pane', key: 'agentRead' } as const, null as { path: string; from: number; to: number; at: number } | null)
 const conflictAtom = atom({ plugin: 'file-pane', key: 'conflict' } as const, null as { path: string; at: number } | null)
 const zipFilterAtom = atom({ plugin: 'file-pane', key: 'zipFilter' } as const, { path: '', text: '' })
 const zipEntryAtom = atom({ plugin: 'file-pane', key: 'zipEntry' } as const, { path: '', name: '' })
@@ -66,6 +99,7 @@ const TICKS_KEPT = 2000
 const noteOpenAtom = atom({ plugin: 'file-pane', key: 'noteOpen' } as const, '')
 // the live log's redraw timer while its tab shows
 let logTimer: { cancel: () => void } | null = null
+let logDrawnAt = 0
 // %APPDATA% / %LOCALAPPDATA%, read once
 let appDirs: string[] | null = null
 // the deploy this chat loaded ({ version, at } from deployed.json beside the mod; null: not read yet, '' fields: a
@@ -348,6 +382,7 @@ async function snapshotBefore($: EngineInterface, path: unknown): Promise<string
 async function openForAgent($: EngineInterface, path: string): Promise<string> {
   const st = await $.fs.stat(path).catch(() => null)
   if (!st) return `Not found: ${path}`
+  await rememberPlace($, path)
   if (st.kind === 'dir') {
     await update($, openAtom, () => null)
     await update($, dirAtom, () => path)
@@ -380,13 +415,93 @@ async function afterClaudeEdit($: EngineInterface, path: unknown): Promise<void>
     await update($, conflictAtom, () => ({ path, at: Date.now() }))
     return
   }
-  const follow = await read($, followAtom)
-  if (follow) {
+  // Claude's own working and temp files (scratch scripts, memory, transcripts) aren't followed, as for reads
+  if (!same && NOT_FOLLOWED.test(path)) return
+  // never takes the pane from unsaved typing in another file: a note instead
+  if (!same && (await typingElsewhere($))) {
+    if (await followOn($)) await update($, msgAtom, () => `👁 Claude edited ${path.split(/[\\/]/).pop()} (not opened: you have unsaved typing here).`)
+    return
+  }
+  if (await followOn($)) {
+    await update($, agentReadAtom, () => null)
+    await showPane($, PANE, false)
     await openForAgent($, path)
     await update($, diffOpenAtom, list => (list.includes(`filediff:${path}`) ? list : [...list, `filediff:${path}`].slice(-50)))
     // the newest edit (the render takes the last step there is)
     await update($, diffBaseAtom, () => ({ path, base: 'claude' as const, edit: Number.MAX_SAFE_INTEGER }))
   } else if (same && open.mode === 'whole') await openForAgent($, path)
+}
+
+/**
+ * Shows Files, Git or Project in the one pane (0.4.8: they were their own dock tabs in 0.4.7, extra tabs to close,
+ * which Strike didn't want), and opens the pane; focus: the keyboard goes there too.
+ */
+async function showPane($: EngineInterface, id: string, focus = true): Promise<void> {
+  await update($, viewAtom, () => (id === GIT_PANE ? 'git' : id === PROJECT_PANE ? 'project' : 'files'))
+  await $.ui.open(focus ? { id: PANE, title: 'Files', focus: true } : { id: PANE, title: 'Files' })
+}
+
+/** ← history: the place shown now goes on the back list before the pane moves to `to` (forward is cleared). */
+async function rememberPlace($: EngineInterface, to: string): Promise<void> {
+  const open = await read($, openAtom)
+  const here = open ? open.path : (await read($, dirAtom)) || (await $.session.cwd())
+  if (!here || here.toLowerCase() === to.toLowerCase()) return
+  await update($, navAtom, n => ({ back: [...n.back.filter(p => p.toLowerCase() !== here.toLowerCase()), here].slice(-50), fwd: [] }))
+}
+
+/**
+ * Folder sizes from Everything's index (voidtools' es.exe, only the copy in Program Files\Everything, by argv, read
+ * only): each folder's direct subfolders with their sizes, a few hundred ms instead of walking them. Folders it doesn't
+ * answer for (excluded from its index, Everything not running) are left out; the helper counts those.
+ */
+async function everythingSizes($: EngineInterface, parents: string[]): Promise<Map<string, number>> {
+  const got = new Map<string, number>()
+  const pf = (await $.env.get('ProgramFiles')) ?? ''
+  const es = pf ? join(join(pf, 'Everything'), 'es.exe') : ''
+  if (!es || !(await $.fs.exists(es).catch(() => false))) return got
+  for (const dir of parents.slice(0, 10)) {
+    const r = await $.process.run([es, '-timeout', '3000', '-parent', dir, '/ad', '-size', '-csv', '-size-format', '1'], { timeoutMs: 8_000 }).catch(() => null)
+    if (!r || r.exitCode !== 0) continue
+    for (const l of r.stdout.split(/\r?\n/)) {
+      const m = /^"(.*?)\\?",(\d+)$/.exec(l.trim())
+      if (m) got.set(m[1]!.toLowerCase(), Number(m[2]))
+    }
+  }
+  return got
+}
+
+/** 👁 Follow Claude, a setting for every chat ($.store): on unless switched off. */
+async function followOn($: EngineInterface): Promise<boolean> {
+  return (await within($, $.store.get('followClaude'), 2000, undefined)) !== false
+}
+
+/** The open file has typing that isn't saved: following Claude to another file would drop it. */
+async function typingElsewhere($: EngineInterface): Promise<boolean> {
+  const open = await read($, openAtom)
+  return open !== null && draft !== null && draft.key.startsWith(`${open.path}|`) && draft.text !== open.text
+}
+
+// Claude's own working files: followed reads skip them (memory, transcripts, tool results, temp files, the plugin's types)
+const NOT_FOLLOWED = /[\\/]\.claude[\\/](projects|plugins|shell-snapshots|mods|todos)[\\/]|[\\/]AppData[\\/]Local[\\/]Temp[\\/]|[\\/]\.claude-plugin[\\/]types[\\/]/i
+
+/**
+ * 👁 Follow Claude after a Read: the file opens in the pane with the lines read marked above it (a band with those
+ * lines). Skips Claude's own working files, and never takes the pane from unsaved typing.
+ */
+async function afterClaudeRead($: EngineInterface, path: unknown, offset: unknown, limit: unknown): Promise<void> {
+  if (typeof path !== 'string' || !path || NOT_FOLLOWED.test(path) || !(await followOn($))) return
+  const open = await read($, openAtom)
+  const same = open !== null && open.path.toLowerCase() === path.toLowerCase()
+  if (!same && (await typingElsewhere($))) return
+  if (!same) {
+    const st = await $.fs.stat(path).catch(() => null)
+    if (!st || st.kind !== 'file') return
+    await showPane($, PANE, false)
+    await openForAgent($, path)
+  }
+  const from = typeof offset === 'number' && offset > 0 ? Math.floor(offset) : 1
+  const to = typeof limit === 'number' && limit > 0 ? from + Math.floor(limit) - 1 : from + 1999
+  await update($, agentReadAtom, () => ({ path, from, to, at: Date.now() }))
 }
 
 // the programs the pane leans on, found or not (checked once per chat, in the background)
@@ -411,6 +526,7 @@ async function checkHealth($: EngineInterface): Promise<Health> {
     { name: 'javap', ok: javap, for: '☕ Bytecode and class diffs (a JDK under Program Files)' },
     { name: 'ILSpy', ok: home ? await exists(join(join(join(home, '.dotnet'), 'tools'), 'ilspycmd.exe')) : false, for: 'C# of .NET DLLs (dotnet tool install -g ilspycmd)' },
     { name: 'Heimdall3D', ok: pf ? await exists(join(join(pf, 'Heimdall3D'), 'heimdall_probe.exe')) : false, for: '.glb / .gltf previews' },
+    { name: 'Everything', ok: pf ? await exists(join(join(pf, 'Everything'), 'es.exe')) : false, for: 'instant folder sizes (es.exe from voidtools.com in Program Files\\Everything; without it the pane counts them itself)' },
   ]
 }
 
@@ -493,15 +609,17 @@ export const register: Register = on => {
     const arg = String(e.args ?? '').trim().replace(/^"(.*)"$/, '$1')
     const tab = PROJECT_TABS.find(t => t === arg.toLowerCase())
     let text = 'Files pane opened.'
-    if (tab) {
-      await update($, viewAtom, () => 'project')
-      await update($, tabAtom, () => tab)
-      text = `Files pane opened at Project → ${tab}.`
-    } else if (arg) {
-      await update($, viewAtom, () => 'files')
-      text = await openForAgent($, /^[A-Za-z]:[\\/]|^[\\/]/.test(arg) ? arg : join(await $.session.cwd(), arg))
+    if (tab === 'git' || tab === 'changes') {
+      await showPane($, GIT_PANE)
+      return { text: 'Git window opened.' }
     }
-    await $.ui.open({ id: PANE, title: 'Files', focus: true })
+    if (tab) {
+      await update($, tabAtom, () => tab)
+      await showPane($, PROJECT_PANE)
+      return { text: `Project window opened at ${tab}.` }
+    }
+    if (arg) text = await openForAgent($, /^[A-Za-z]:[\\/]|^[\\/]/.test(arg) ? arg : join(await $.session.cwd(), arg))
+    await showPane($, PANE)
     return { text }
   })
 
@@ -510,7 +628,7 @@ export const register: Register = on => {
     const answer = (text: string) => ({ result: text, text })
     const path = typeof e.path === 'string' ? e.path.trim() : ''
     if (!path) return answer('Give the file to show (an absolute path).')
-    await update($, viewAtom, () => 'files')
+    await showPane($, PANE)
     let said = await openForAgent($, path)
     const diff = e.diff === 'commit' || e.diff === 'claude' || e.diff === 'backup' ? e.diff : undefined
     if (diff) {
@@ -606,6 +724,11 @@ export const register: Register = on => {
     if (ok) await afterClaudeEdit($, e.file_path)
     return r
   })
+  on('tool.call', { tool: 'Read' }, async ($, e, next) => {
+    const r = await next(e)
+    if (r.deny === undefined && r.isError !== true) await afterClaudeRead($, e.file_path, e.offset, e.limit)
+    return r
+  })
   on('tool.call', { tool: 'NotebookEdit' }, async ($, e, next) => {
     const r = await next(e)
     await recordChange($, e.notebook_path, 'NotebookEdit', r.deny === undefined && r.isError !== true)
@@ -628,36 +751,30 @@ export const register: Register = on => {
     return (
       <Box flexDirection="row" gap={1}>
         <Button key="band-open" label="📁 Files" plain onPress={() => void (async () => {
-          await update($, viewAtom, () => 'files')
-          await $.ui.open({ id: PANE, title: 'Files', focus: true })
+          await showPane($, PANE)
         })()} />
         {conflict ? (
           <Button key="band-conflict" label={`⚠ ${conflict.path.split(/[\\/]/).pop()}: Claude edited it over your unsaved typing`} plain onPress={() => void (async () => {
-            await update($, viewAtom, () => 'files')
-            await $.ui.open({ id: PANE, title: 'Files', focus: true })
+            await showPane($, PANE)
           })()} />
         ) : null}
         {changes ? (
           <Button key="band-changes" label={`✎ ${changes} edited`} plain onPress={() => void (async () => {
-            await update($, viewAtom, () => 'project')
-            await update($, tabAtom, () => 'changes')
-            await $.ui.open({ id: PANE, title: 'Files', focus: true })
+            await showPane($, GIT_PANE)
           })()} />
 
         ) : null}
         {failing.length ? (
           <Button key="band-checks" label={`❌ ${failing.join(', ')}`} plain onPress={() => void (async () => {
-            await update($, viewAtom, () => 'project')
             await update($, tabAtom, () => 'checks')
-            await $.ui.open({ id: PANE, title: 'Files', focus: true })
+            await showPane($, PROJECT_PANE)
           })()} />
 
         ) : null}
         {open ? (
           <Button key="band-items" label={`☐ ${open} open`} plain onPress={() => void (async () => {
-            await update($, viewAtom, () => 'project')
             await update($, tabAtom, () => 'items')
-            await $.ui.open({ id: PANE, title: 'Files', focus: true })
+            await showPane($, PROJECT_PANE)
           })()} />
 
         ) : null}
@@ -668,7 +785,8 @@ export const register: Register = on => {
     )
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    if (e.requestId !== PANE && e.requestId !== GIT_PANE && e.requestId !== PROJECT_PANE) return next(e)
     // anything that goes wrong while drawing shows here, instead of an empty pane; the step it's on shows on the
     // status line under the prompt while it draws (so a step that never finishes says which it is)
     const step = (s: string) => $.ui.status(`Files pane: ${s}…`)
@@ -684,7 +802,8 @@ export const register: Register = on => {
     // a picture as a small PNG (Windows imaging), sized under the SVG element's 131,072 characters
     // shell: Explorer's thumbnail (3D models and the like) instead of decoding the picture
     const thumb = async (path: string, shell = false): Promise<Thumb | string> => {
-      for (const max of [420, 280, 160]) {
+      // as big as fits the SVG element (pictures read small at 420 px: Strike, 2026-11-11)
+      for (const max of [800, 560, 420, 280, 160]) {
         try {
           const q = (s: string) => `'${s.replace(/'/g, "''")}'`
           const r = await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', `& { ${shell ? SHELL_THUMB_PS : THUMB_PS} } ${q(path)} ${max}`], { timeoutMs: 45_000 })
@@ -701,14 +820,14 @@ export const register: Register = on => {
     const picture = (key: string, t: Thumb, alt: string, zoom = 1) => {
       const vw = t.tw / zoom
       const vh = t.th / zoom
+      // drawn up to twice its size (1200 px at most), and never wider than the pane: the element fits its slot
+      const shownW = Math.min(1200, t.tw * 2)
       const box = `${((t.tw - vw) / 2).toFixed(1)} ${((t.th - vh) / 2).toFixed(1)} ${vw.toFixed(1)} ${vh.toFixed(1)}`
       return Svg ? (
         <Svg
           key={key}
           alt={alt}
-          width={t.tw}
-          height={t.th}
-          source={`<svg xmlns="http://www.w3.org/2000/svg" width="${t.tw}" height="${t.th}" viewBox="${box}"><image href="data:image/${t.mime === 'jpeg' ? 'jpeg' : 'png'};base64,${t.b64}" width="${t.tw}" height="${t.th}"/></svg>`}
+          source={`<svg xmlns="http://www.w3.org/2000/svg" width="${shownW}" height="${Math.round((shownW * t.th) / t.tw)}" viewBox="${box}"><image href="data:image/${t.mime === 'jpeg' ? 'jpeg' : 'png'};base64,${t.b64}" width="${t.tw}" height="${t.th}"/></svg>`}
         />
       ) : (
         <Text dimColor>{alt}</Text>
@@ -719,7 +838,7 @@ export const register: Register = on => {
     const lineNos = await read($, lineNosAtom)
     // ↩ Wrap: long lines continue on more rows, or stay one row cut at the edge (every Text / Code the pane draws)
     const wrap = await read($, wrapAtom)
-    const follow = await read($, followAtom)
+    const follow = await followOn($)
     // the tools check runs once per chat, in the background (a module variable, not state: drawing can't write state)
     if (!healthStarted) {
       healthStarted = true
@@ -731,6 +850,34 @@ export const register: Register = on => {
     const compact = await read($, compactAtom)
     const conflict = await read($, conflictAtom)
     const wrapMode = wrap ? ('wrap' as const) : ('truncate-end' as const)
+    // ▭ a card (Strike, 2026-11-11: "sectioning"): a rounded box with a bold title and its count or state on the
+    // right. With `fold`, the title is a button and a folded card is just its title row.
+    const card = (key: string, title: string, note: string, body: unknown, fold?: { open: boolean; toggle: () => void; button?: string }, go?: () => void) => (
+      <Box key={`card:${key}`} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+        <Box flexDirection="row" gap={1} alignItems="center">
+          {fold ? <Button key={fold.button ?? `card-btn:${key}`} label={`${fold.open ? '▾' : '▸'} ${title}`} plain onPress={fold.toggle} /> : go ? <Button key={`card-go:${key}`} label={`${title} ›`} plain onPress={go} /> : <Text bold>{title}</Text>}
+          <Box flexGrow={1} />
+          {note ? <Text dimColor wrap="truncate-end">{note}</Text> : null}
+        </Box>
+        {!fold || fold.open ? (body as never) : null}
+      </Box>
+    )
+    // ▦ a table row (Strike, 2026-11-11: "columns"): the first cell takes the room left, the others fixed widths (in
+    // cells), each cut at its edge, so every row lines up under the header
+    const tableRow = (key: string, first: unknown, rest: [unknown, number][], indent = 0) => (
+      <Box key={key} flexDirection="row" gap={1} marginLeft={indent}>
+        <Box flexGrow={1} flexShrink={1} minWidth={10}>
+          {first as never}
+        </Box>
+        {rest.map(([c, w], i) => (
+          <Box key={`${key}:c${i}`} width={w} flexShrink={0}>
+            {typeof c === 'string' ? <Text dimColor wrap="truncate-end">{c}</Text> : (c as never)}
+          </Box>
+        ))}
+      </Box>
+    )
+    // a table's header: dim bold labels (a label can be a button, e.g. to sort by that column)
+    const headCell = (label: string) => <Text bold dimColor wrap="truncate-end">{label}</Text>
     // a diff, one column (colored by the Code element) or two (before | after)
     const diffView = (k: string, text: string) => {
       // # Line numbers in one column: the lines drawn one by one (the engine's diff view numbers nothing)
@@ -929,12 +1076,27 @@ export const register: Register = on => {
     const lastBackup = await read($, backupAtom)
     const rows = Math.max(8, (e.viewport?.rows ?? 30) - 12)
 
-    const goDir = async (to: string) => {
+    // ← → : every move to another folder or file is remembered (rec false: a move made by ← or → itself)
+    const here = open ? open.path : dir
+    const goDir = async (to: string, rec = true) => {
+      if (rec) await rememberPlace($, to)
       draft = null
       await update($, openAtom, () => null)
-      await update($, shownAtom, () => LIST)
+      await update($, shownAtom, () => 0)
       await update($, dirAtom, () => to)
       await say('')
+    }
+
+    // ← back / → forward: the place shown now moves to the other list
+    const goNav = async (dirn: 'back' | 'fwd') => {
+      const n = await read($, navAtom)
+      const to = dirn === 'back' ? n.back.at(-1) : n.fwd[0]
+      if (!to) return
+      await update($, navAtom, x =>
+        dirn === 'back' ? { back: x.back.slice(0, -1), fwd: [here, ...x.fwd].slice(0, 50) } : { back: [...x.back, here].slice(-50), fwd: x.fwd.slice(1) },
+      )
+      await showPane($, PANE)
+      await openPath(to, false)
     }
 
     const loadPage = async (path: string, start: number, size: number, mtimeMs: number) => {
@@ -947,15 +1109,17 @@ export const register: Register = on => {
       await say('')
     }
 
-    const openPath = async (path: string) => {
+    const openPath = async (path: string, rec = true) => {
       let st
       try {
         st = await $.fs.stat(path)
       } catch (err) {
         return say(`Not found: ${path}`)
       }
-      if (st.kind === 'dir') return goDir(path)
+      if (st.kind === 'dir') return goDir(path, rec)
       if (st.kind !== 'file') return say('That is neither a file nor a folder.')
+      if (rec) await rememberPlace($, path)
+      await update($, agentReadAtom, r => (r && r.path.toLowerCase() === path.toLowerCase() ? r : null))
       await update($, recentAtom, list => [path, ...list.filter(p => p.toLowerCase() !== path.toLowerCase())].slice(0, 15))
       await update($, dirAtom, () => parent(path))
       if (st.size > PAGE) return loadPage(path, 0, st.size, st.mtimeMs)
@@ -1008,7 +1172,8 @@ export const register: Register = on => {
       await say(`Put back the version from before the last save. The one it replaced is in ${String(b.backup)}.`)
     }
 
-    const view = await read($, viewAtom)
+    // (a Git or Project tab left open from 0.4.7 still draws its page)
+    const view: 'files' | 'git' | 'project' = e.requestId === GIT_PANE ? 'git' : e.requestId === PROJECT_PANE ? 'project' : await read($, viewAtom)
     const toggled = new Set(await read($, toggledAtom))
     const flip = (k: string) => update($, toggledAtom, list => (list.includes(k) ? list.filter(x => x !== k) : [...list, k].slice(-400)))
 
@@ -1016,7 +1181,7 @@ export const register: Register = on => {
      * Lines [from, to) of a text file replaced by `next`: read again first and refused unless they're still `expected`
      * (someone else changed the file), a backup copy first, then written whole (temp file renamed over it).
      */
-    const replaceLines = async (path: string, from: number, expected: string[], next: string[]): Promise<boolean> => {
+    const replaceLines = async (path: string, from: number, expected: string[], replacement: string[]): Promise<boolean> => {
       const st = await $.fs.stat(path).catch(() => null)
       if (!st) {
         await say('That file is gone.')
@@ -1035,7 +1200,7 @@ export const register: Register = on => {
         await say('Those lines changed in the file since they were shown: nothing was changed (shown again now).')
         return false
       }
-      lines.splice(from, expected.length, ...next)
+      lines.splice(from, expected.length, ...replacement)
       const b = await backupOf(path)
       if (!b.ok) {
         await say(`Not changed: the backup copy failed (${String(b.error ?? 'unknown')}).`)
@@ -1395,8 +1560,8 @@ export const register: Register = on => {
                       />
                       <Box flexDirection="row" gap={1}>
                         <Button key={`save:${k}`} variant="primary" onPress={() => void (async () => {
-                          const next = (typed.get(k) ?? body.join('\n')).split(/\r?\n/)
-                          if (await replaceLines(path, s.from + 1, body, next)) await say(`Saved “${s.title}”.`)
+                          const newText = (typed.get(k) ?? body.join('\n')).split(/\r?\n/)
+                          if (await replaceLines(path, s.from + 1, body, newText)) await say(`Saved “${s.title}”.`)
                           await stopEdit()
                         })()}>
                           Save section
@@ -1425,13 +1590,32 @@ export const register: Register = on => {
       )
     }
 
+    // git's answers are kept (gitCache): a tab draws at once from the last answer, and one older than 4 s is asked
+    // again in the background (one run per question at a time, 20 s timeout), redrawing only when it changed
     const git = async (root: string, args: string[]) => {
-      try {
-        const r = await $.process.run(['git', '-c', 'core.quotepath=false', ...args], { cwd: root, timeoutMs: 20_000 })
-        return r.stdout
-      } catch {
-        return ''
+      const k = `${root}\u0000${args.join('\u0000')}`
+      const ask = async () => {
+        try {
+          return (await $.process.run(['git', '-c', 'core.quotepath=false', ...args], { cwd: root, timeoutMs: 20_000 })).stdout
+        } catch {
+          return ''
+        }
       }
+      const hit = gitCache.get(k)
+      if (!hit) {
+        const out = await ask()
+        keepGit(k, out)
+        return out
+      }
+      if (Date.now() - hit.at > 4_000 && !gitAsking.has(k)) {
+        gitAsking.add(k)
+        void ask().then(out => {
+          gitAsking.delete(k)
+          keepGit(k, out)
+          if (out !== hit.out) $.ui.invalidate('ui.render')
+        })
+      }
+      return hit.out
     }
     const diffOpen = new Set(await read($, diffOpenAtom))
     const flipDiff = (k: string) => update($, diffOpenAtom, list => (list.includes(k) ? list.filter(x => x !== k) : [...list, k].slice(-50)))
@@ -1445,59 +1629,448 @@ export const register: Register = on => {
       return diffView(`diff:${k}`, shown)
     }
 
-    const changesView = async (root: string, tab: 'changes' | 'git') => {
-      const rel = (p: string) => (p.toLowerCase().startsWith(root.toLowerCase()) ? p.slice(root.length).replace(/^[\\/]/, '') : p)
-      const status = await git(root, ['status', '--porcelain=v1', '-uall'])
-      const states = new Map<string, string>()
-      for (const l of status.split(/\r?\n/)) if (l.length > 3) states.set(l.slice(3).replace(/^"|"$/g, '').toLowerCase(), l.slice(0, 2))
-      const label = (x: string) => (x === '??' ? 'new' : x.includes('M') ? 'changed' : x.includes('A') ? 'added' : x.includes('D') ? 'deleted' : x.includes('R') ? 'renamed' : x.trim())
-      const rows =
-        tab === 'changes'
-          ? (await read($, changesAtom)).map(c => ({ path: c.path, rel: rel(c.path).replace(/\\/g, '/'), note: `${c.tool}${c.n > 1 ? ` ×${c.n}` : ''} · ${new Date(c.at).toLocaleTimeString()}`, before: c.before }))
-          : [...states.entries()].map(([r, x]) => ({ path: join(root, r), rel: r, note: label(x), before: undefined as string | undefined }))
-      const branch = tab === 'git' ? (await git(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim() : ''
+    const LOG_FORMAT = '--format=%H%x09%ct%x09%an%x09%s'
+    // one commit: its line (sha, subject, who, when); ▸ opens its files, each with its own diff
+    const commitRow = async (root: string, c: { sha: string; at: number; author: string; subject: string }, scope: string, only?: string) => {
+      const k = `commit:${scope}:${c.sha}`
+      const now = Date.now()
+      const tone = ageTone(c.at, now)
+      let files: { path: string; add: number; del: number }[] = []
+      if (diffOpen.has(k))
+        files = (await git(root, ['show', '--numstat', '--format=', c.sha, ...(only ? ['--', only] : [])]))
+          .split(/\r?\n/)
+          .map(l => /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(l))
+          .filter((m): m is RegExpExecArray => !!m)
+          .map(m => ({ path: m[3]!, add: m[1] === '-' ? -1 : Number(m[1]), del: m[2] === '-' ? -1 : Number(m[2]) }))
+          .slice(0, CHANGES_PAGE)
       const out = []
-      for (const row of rows) {
-        const k = `${tab}:${row.rel}`
-        const st = states.get(row.rel.toLowerCase())
+      for (const f of files) {
+        const fk = `${k}:${f.path}`
         out.push(
-          <Box key={`ch:${k}`} flexDirection="column">
-            <Box flexDirection="row" gap={1}>
-              <Button key={`d:${k}`} label={`${diffOpen.has(k) ? '▾' : '▸'} ${kindOf(row.rel)[0]} ${row.rel}`} plain onPress={() => void flipDiff(k)} />
-              <Text wrap={wrapMode} color={GIT_COLOR[tab === 'git' ? row.note : label(st ?? '')]}>● </Text>
-              <Text wrap={wrapMode} dimColor>
-                {row.note}
-                {tab === 'changes' && st ? ` · git: ${label(st)}` : tab === 'changes' ? ' · git: committed or outside' : ''}
-              </Text>
-              <Button key={`o:${k}`} plain onPress={() => void (async () => {
-                await update($, viewAtom, () => 'files')
-                await openPath(row.path)
-              })()}>
-                Open
-              </Button>
-              {row.before ? (
-                // Claude's own change: the file against the copy made before its first edit this session
-                <Button key={`cl:${k}`} label="± Claude's change" plain onPress={() => void (async () => {
-                  await update($, diffBaseAtom, () => ({ path: row.path, base: 'claude' }))
-                  await update($, diffOpenAtom, list => [...list.filter(x => x !== `filediff:${row.path}`), `filediff:${row.path}`].slice(-50))
-                  await update($, viewAtom, () => 'files')
-                  await openPath(row.path)
-                })()} />
-              ) : null}
+          <Box key={`cf:${fk}`} flexDirection="column" marginLeft={2}>
+            <Box flexDirection="row" gap={1} flexWrap="wrap">
+              <Button key={`cfd:${fk}`} label={`${diffOpen.has(fk) ? '▾' : '▸'} ${kindOf(f.path)[0]} ${f.path}`} plain onPress={() => void flipDiff(fk)} />
+              <Text wrap={wrapMode} dimColor>{f.add < 0 ? 'binary' : `+${f.add} −${f.del}`}</Text>
             </Box>
-            {diffOpen.has(k) ? diffBlock(k, await fileDiff(root, row.rel, st === '??')) : null}
+            {diffOpen.has(fk) ? diffBlock(fk, await git(root, ['show', ...wsArgs, '--format=', c.sha, '--', f.path])) : null}
           </Box>,
         )
       }
       return (
+        <Box key={`cm:${k}`} flexDirection="column">
+          {tableRow(
+            `cmr:${k}`,
+            <Button key={`cmb:${k}`} label={`${diffOpen.has(k) ? '▾' : '▸'} ${c.sha.slice(0, 7)} ${c.subject}`} plain onPress={() => void flipDiff(k)} />,
+            [
+              [c.author, 14],
+              [<Text wrap="truncate-end" color={tone === 'new' ? 'success' : undefined} dimColor={tone !== 'new'}>{`${age(c.at, now)} ago`}</Text>, 11],
+            ],
+          )}
+          {out}
+        </Box>
+      )
+    }
+
+    // Branches: each local branch with its last commit and how far it is from its remote; Compare with this branch
+    const gitBranchesView = async (root: string) => {
+      const g = await read($, gitListAtom)
+      const now = Date.now()
+      const branches = branchesFrom(await git(root, ['branch', '--format=%(HEAD)%09%(refname:short)%09%(committerdate:unix)%09%(upstream:short)%09%(upstream:track)'])).sort(
+        (a, b) => Number(b.current) - Number(a.current) || b.at - a.at,
+      )
+      const current = branches.find(b => b.current)?.name ?? (await git(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+      const remotes = (await git(root, ['branch', '-r', '--format=%(refname:short)'])).split(/\r?\n/).filter(l => l.trim() && !/\/HEAD$/.test(l))
+      const other = g.compare && branches.some(b => b.name === g.compare) ? g.compare : ''
+      let compare = null
+      if (other) {
+        // what each side has that the other hasn't, and the files that differ since they split
+        const theirs = logFrom(await git(root, ['log', '-n', '20', LOG_FORMAT, `${current}..${other}`]))
+        const mine = logFrom(await git(root, ['log', '-n', '20', LOG_FORMAT, `${other}..${current}`]))
+        const files = (await git(root, ['diff', '--numstat', `${current}...${other}`]))
+          .split(/\r?\n/)
+          .map(l => /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(l))
+          .filter((m): m is RegExpExecArray => !!m)
+        const fileRows = []
+        for (const m of files.slice(0, CHANGES_PAGE)) {
+          const fk = `cmp:${other}:${m[3]}`
+          fileRows.push(
+            <Box key={`cmpf:${fk}`} flexDirection="column">
+              <Box flexDirection="row" gap={1} flexWrap="wrap">
+                <Button key={`cmpd:${fk}`} label={`${diffOpen.has(fk) ? '▾' : '▸'} ${kindOf(m[3]!)[0]} ${m[3]}`} plain onPress={() => void flipDiff(fk)} />
+                <Text wrap={wrapMode} dimColor>{m[1] === '-' ? 'binary' : `+${m[1]} −${m[2]}`}</Text>
+              </Box>
+              {diffOpen.has(fk) ? diffBlock(fk, await git(root, ['diff', ...wsArgs, `${current}...${other}`, '--', m[3]!])) : null}
+            </Box>,
+          )
+        }
+        const theirRows = []
+        for (const c of theirs) theirRows.push(await commitRow(root, c, `theirs:${other}`))
+        const mineRows = []
+        for (const c of mine) mineRows.push(await commitRow(root, c, `mine:${other}`))
+        compare = (
+          <Box key="compare" flexDirection="column" gap={1} borderStyle="round" borderDimColor paddingX={1}>
+            <Box flexDirection="row" gap={1} flexWrap="wrap">
+              <Text wrap={wrapMode} bold>{`${current} ↔ ${other}`}</Text>
+              <Button key="cmp-close" label="✕" plain onPress={() => void update($, gitListAtom, x => ({ ...x, compare: '' }))} />
+            </Box>
+            <Text wrap={wrapMode} dimColor>{`Only on ${other}: ${theirs.length}${theirs.length === 20 ? '+' : ''} commit${theirs.length === 1 ? '' : 's'}`}</Text>
+            {theirRows}
+            <Text wrap={wrapMode} dimColor>{`Only on ${current}: ${mine.length}${mine.length === 20 ? '+' : ''} commit${mine.length === 1 ? '' : 's'}`}</Text>
+            {mineRows}
+            <Text wrap={wrapMode} dimColor>{`${files.length} file${files.length === 1 ? '' : 's'} differ on ${other} since the two split${files.length > CHANGES_PAGE ? ` (the first ${CHANGES_PAGE})` : ''}`}</Text>
+            {fileRows}
+          </Box>
+        )
+      }
+      return (
         <Box flexDirection="column" gap={1}>
-          {sideToggle}
+          <Text wrap={wrapMode} dimColor>{`${branches.length} local branch${branches.length === 1 ? '' : 'es'}${remotes.length ? `, ${remotes.length} on remotes` : ''}; newest first. Read only: switching branches is git's (or VS Code's) job.`}</Text>
+          {branches.slice(0, CHANGES_PAGE).map(b => {
+            const tone = ageTone(b.at, now)
+            return (
+              <Box key={`br:${b.name}`} flexDirection="row" gap={1} flexWrap="wrap">
+                <Text wrap={wrapMode} bold={b.current} color={b.current ? 'success' : undefined}>{`${b.current ? '●' : '○'} ${b.name}`}</Text>
+                <Text wrap={wrapMode} color={tone === 'new' ? 'success' : undefined} dimColor={tone === 'old'}>{`last commit ${age(b.at, now)} ago`}</Text>
+                {b.upstream ? <Text wrap={wrapMode} color={b.ahead || b.behind ? 'warning' : undefined} dimColor={!b.ahead && !b.behind}>{`${b.ahead ? `↑${b.ahead} ` : ''}${b.behind ? `↓${b.behind} ` : ''}${b.ahead || b.behind ? `vs ${b.upstream}` : `= ${b.upstream}`}`}</Text> : <Text wrap={wrapMode} dimColor>no remote</Text>}
+                {b.current ? null : <Button key={`br-cmp:${b.name}`} label={other === b.name ? 'Comparing' : 'Compare'} variant={other === b.name ? 'primary' : 'secondary'} onPress={() => void update($, gitListAtom, x => ({ ...x, compare: x.compare === b.name ? '' : b.name }))} />}
+              </Box>
+            )
+          })}
+          {compare}
+        </Box>
+      )
+    }
+
+    // 🌿 the Git window, one page (Strike, 2026-11-11): where the branch stands, the graph of every branch's recent
+    // commits (a picture), those commits as rows (▸ files, ▸ a file's diff), then the uncommitted changes, Claude's
+    // edits and the branches (with Compare), folded. Read only: nothing commits, switches or pushes.
+    const GRAPH_ROWS = 30
+    const LANE_COLORS = ['#4f9dff', '#3fb950', '#d29922', '#db61a2', '#a371f7', '#39c5cf', '#f85149', '#8b949e']
+    const graphSvg = (rows: GraphRow[]) => {
+      const rowH = 22
+      const laneW = 14
+      const lanesN = Math.max(1, ...rows.map(r => Math.max(r.col + 1, r.lanes.length)))
+      const gx = (c: number) => 12 + c * laneW
+      const gy = (i: number) => 14 + i * rowH
+      const textX = gx(lanesN) + 6
+      const W = 640
+      const H = gy(rows.length - 1) + 14
+      const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      const parts: string[] = []
+      rows.forEach((r, i) => {
+        const below = rows[i + 1]
+        r.lanes.forEach((p, L) => {
+          if (!p) return
+          const x1 = r.parents.includes(p) ? gx(r.col) : gx(L)
+          const y1 = gy(i)
+          const x2 = below && below.sha === p ? gx(below.col) : gx(L)
+          const y2 = below ? gy(i + 1) : y1 + rowH / 2
+          const color = LANE_COLORS[L % LANE_COLORS.length]
+          parts.push(x1 === x2 ? `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>` : `<path d="M${x1} ${y1} C${x1} ${(y1 + y2) / 2} ${x2} ${(y1 + y2) / 2} ${x2} ${y2}" stroke="${color}" stroke-width="2" fill="none"/>`)
+        })
+      })
+      const now = Date.now()
+      rows.forEach((r, i) => {
+        const color = LANE_COLORS[r.col % LANE_COLORS.length]
+        parts.push(`<circle cx="${gx(r.col)}" cy="${gy(i)}" r="${r.parents.length > 1 ? 3.5 : 4.5}" fill="${r.parents.length > 1 ? '#202124' : color}" stroke="${color}" stroke-width="2"/>`)
+        let x = textX
+        for (const ref of r.refs.slice(0, 3)) {
+          const w = ref.length * 6.6 + 10
+          parts.push(`<rect x="${x}" y="${gy(i) - 8}" width="${w}" height="16" rx="8" fill="${color}" fill-opacity="0.22" stroke="${color}"/><text x="${x + 5}" y="${gy(i) + 4}" font-size="11" fill="#e8eaed" font-family="Segoe UI, sans-serif">${esc(ref)}</text>`)
+          x += w + 4
+        }
+        const room = Math.max(8, Math.floor((W - 70 - x) / 6.4))
+        parts.push(`<text x="${x}" y="${gy(i) + 4}" font-size="12" fill="#e8eaed" font-family="Segoe UI, sans-serif">${esc(r.subject.length > room ? `${r.subject.slice(0, room - 1)}…` : r.subject)}</text>`)
+        parts.push(`<text x="${W - 8}" y="${gy(i) + 4}" font-size="11" fill="#9aa0a6" text-anchor="end" font-family="Segoe UI, sans-serif">${esc(age(r.at, now))}</text>`)
+      })
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect width="${W}" height="${H}" rx="8" fill="#202124"/>${parts.join('')}</svg>`
+    }
+    const gitPage = async (root: string) => {
+      if (!root || !(await repoOf($, root))) return <Text wrap={wrapMode} dimColor>This folder isn't in a git repository.</Text>
+      const g = await read($, gitListAtom)
+      // where this branch stands
+      const branches = branchesFrom(await git(root, ['branch', '--format=%(HEAD)%09%(refname:short)%09%(committerdate:unix)%09%(upstream:short)%09%(upstream:track)']))
+      const cur = branches.find(b => b.current)
+      const status = (await git(root, ['status', '--porcelain=v1', '-uall'])).split(/\r?\n/).filter(l => l.length > 3)
+      let add = 0
+      let del = 0
+      for (const l of (await git(root, ['diff', '--numstat', 'HEAD'])).split(/\r?\n/)) {
+        const m = /^(\d+)\t(\d+)\t/.exec(l)
+        if (m) {
+          add += Number(m[1])
+          del += Number(m[2])
+        }
+      }
+      const claudeEdits = (await read($, changesAtom)).length
+      // the graph: every branch's newest commits, a page of 30
+      const page = g.page
+      const rows = graphRows(await git(root, ['log', '--all', '--date-order', `--skip=${page * GRAPH_ROWS}`, '-n', String(GRAPH_ROWS + 1), '--format=%H%x09%P%x09%ct%x09%an%x09%D%x09%s']))
+      const more = rows.length > GRAPH_ROWS
+      const shownRows = rows.slice(0, GRAPH_ROWS)
+      const list = []
+      for (const r of shownRows) list.push(await commitRow(root, r, 'graph'))
+      // a folded section: its header a plain row, open when pressed (kept per chat)
+      const section = async (key: string, title: string, note: string, draw: () => Promise<unknown>) => {
+        const isOpen = toggled.has(`git:${key}`)
+        return card(key, title, note, isOpen ? await draw() : null, { open: isOpen, toggle: () => void flip(`git:${key}`), button: `sec-btn:${key}` })
+      }
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text wrap={wrapMode}>
+            {`On ${cur?.name ?? '(no branch)'}`}
+            {cur?.upstream ? <Text color={cur.ahead || cur.behind ? 'warning' : undefined} dimColor={!cur.ahead && !cur.behind}>{` · ${cur.ahead ? `↑${cur.ahead} ` : ''}${cur.behind ? `↓${cur.behind} ` : ''}${cur.ahead || cur.behind ? `vs ${cur.upstream}` : `up to date with ${cur.upstream}`}`}</Text> : <Text dimColor> · no remote</Text>}
+            <Text dimColor>{` · ${branches.length} branch${branches.length === 1 ? '' : 'es'}`}</Text>
+            {status.length ? <Text color="warning">{` · ${status.length} uncommitted`}</Text> : <Text dimColor> · nothing uncommitted</Text>}
+          </Text>
+          {shownRows.length && Svg ? card('graph', 'Graph', `every branch · ${page ? `commits ${page * GRAPH_ROWS + 1}-${page * GRAPH_ROWS + shownRows.length}` : `newest ${shownRows.length}`}`, <Svg key="git-graph" alt={`The newest ${shownRows.length} commits of every branch, as a graph`} source={graphSvg(shownRows)} />) : null}
+          {shownRows.length ? card('commits', 'Commits', `${shownRows.length}${more ? '+' : ''}`, [tableRow('cm-head', headCell('Commit'), [[headCell('Author'), 14], [headCell('When'), 11]]), ...list]) : null}
+          {page > 0 || more ? (
+            <Box key="graph-pages" flexDirection="row" gap={1} flexWrap="wrap">
+              {page > 0 ? <Button key="graph-newer" label="◀ Newer" plain onPress={() => void update($, gitListAtom, x => ({ ...x, page: Math.max(0, page - 1) }))} /> : null}
+              {more ? <Button key="graph-older" label="Older ▶" plain onPress={() => void update($, gitListAtom, x => ({ ...x, page: page + 1 }))} /> : null}
+            </Box>
+          ) : null}
+          {!shownRows.length ? <Text wrap={wrapMode} dimColor>No commits yet.</Text> : null}
+          {await section('uncommitted', 'Uncommitted changes', status.length ? `${status.length} file${status.length === 1 ? '' : 's'} · +${add.toLocaleString('en-US')} −${del.toLocaleString('en-US')}` : 'none', () => changesView(root, 'git'))}
+          {await section('claude', "Claude's edits this chat", claudeEdits ? `${claudeEdits} file${claudeEdits === 1 ? '' : 's'}` : 'none yet', () => changesView(root, 'changes'))}
+          {await section('branches', 'Branches', `${branches.length} · ${branches.filter(b => b.ahead || b.behind).length} out of step with their remote · Compare`, () => gitBranchesView(root))}
+          <Text wrap={wrapMode} dimColor>Read only: commit, switch and push in git or VS Code.</Text>
+        </Box>
+      )
+    }
+
+    const changesView = async (root: string, tab: 'changes' | 'git') => {
+      const g0 = await read($, gitListAtom)
+      const rel = (p: string) => (p.toLowerCase().startsWith(root.toLowerCase()) ? p.slice(root.length).replace(/^[\\/]/, '') : p)
+      const status = await git(root, ['status', '--porcelain=v1', '-uall'])
+      const states = new Map<string, string>()
+      const names = new Map<string, string>() // the same keys, the path as git wrote it (keys are lower case)
+      for (const l of status.split(/\r?\n/))
+        if (l.length > 3) {
+          const name = l.slice(3).replace(/^"|"$/g, '')
+          states.set(name.toLowerCase(), l.slice(0, 2))
+          names.set(name.toLowerCase(), name)
+        }
+      const label = (x: string) => (x === '??' ? 'new' : x.includes('M') ? 'changed' : x.includes('A') ? 'added' : x.includes('D') ? 'deleted' : x.includes('R') ? 'renamed' : x.trim())
+      // lines added / removed against the last commit: git's numstat for tracked files, a line count for new ones
+      const plus = new Map<string, [number, number]>()
+      let ns = numstats.get(root)
+      if (!ns || ns.key !== status || Date.now() - ns.at > 5_000) {
+        ns = { key: status, at: Date.now(), text: await git(root, ['diff', '--numstat', 'HEAD']) }
+        numstats.set(root, ns)
+      }
+      for (const l of ns.text.split(/\r?\n/)) {
+        const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(l)
+        if (m) plus.set(m[3]!.replace(/^"|"$/g, '').toLowerCase(), [m[1] === '-' ? -1 : Number(m[1]), m[2] === '-' ? -1 : Number(m[2])])
+      }
+      const untracked = [...states.entries()].filter(([, x]) => x === '??').map(([r]) => names.get(r) ?? r)
+      if (untracked.length) {
+        const key = untracked.join('\n')
+        let c = newLines.get(root)
+        if (!c || c.key !== key || Date.now() - c.at > 15_000) {
+          const r = await helper(['lines', root], JSON.stringify(untracked))
+          c = { key, at: Date.now(), counts: (r.counts ?? {}) as Record<string, number> }
+          newLines.set(root, c)
+        }
+        for (const [n, v] of Object.entries(c.counts)) plus.set(n.toLowerCase(), [v, v < 0 ? -1 : 0])
+      }
+      const all =
+        tab === 'changes'
+          ? (await read($, changesAtom)).map(c => ({ path: c.path, rel: rel(c.path).replace(/\\/g, '/'), note: `${c.tool}${c.n > 1 ? ` ×${c.n}` : ''} · ${new Date(c.at).toLocaleTimeString()}`, before: c.before }))
+          : [...states.entries()].map(([r, x]) => ({ path: join(root, names.get(r) ?? r), rel: names.get(r) ?? r, note: label(x), before: undefined as string | undefined }))
+      const branch = tab === 'git' ? (await git(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim() : ''
+      // each file's kind (for the filter and its colour) and its + / − lines
+      const rows = all.map((row, i) => {
+        const st = states.get(row.rel.toLowerCase())
+        const lb = st ? label(st) : ''
+        const kind = !st ? 'committed' : lb === 'new' || lb === 'added' ? 'new' : lb === 'deleted' ? 'deleted' : 'changed'
+        const [add, del] = plus.get(row.rel.toLowerCase()) ?? [0, 0]
+        return { ...row, i, st, lb, kind, add, del }
+      })
+      type Row = (typeof rows)[number]
+      const g = g0
+      // when each file was last changed on disk, and its newest commit (one git log for all), kept 15 s
+      // (worked out in the background, a few hundred file dates in a big repo: the list draws at once, the dates
+      // fill in when ready)
+      const old = gitDates.get(root)
+      if ((!old || old.key !== status + rows.length || Date.now() - old.at > 15_000) && !gitAsking.has(`dates:${root}`)) {
+        gitAsking.add(`dates:${root}`)
+        void (async () => {
+          const disk = new Map<string, number>()
+          for (const r of rows.slice(0, 2000)) {
+            const st = await $.fs.stat(r.path).catch(() => null)
+            if (st) disk.set(r.rel.toLowerCase(), st.mtimeMs)
+          }
+          const committed = lastCommitByFile(await git(root, ['log', '-n', '400', '--format=%x01%ct', '--name-only']))
+          gitDates.set(root, { key: status + rows.length, at: Date.now(), disk, committed })
+          gitAsking.delete(`dates:${root}`)
+          $.ui.invalidate('ui.render')
+        })()
+      }
+      const dates = old ?? { key: '', at: 0, disk: new Map<string, number>(), committed: new Map<string, number>() }
+      const nowMs = Date.now()
+      const find = g.find.trim().toLowerCase()
+      const counts = { all: rows.length, changed: 0, new: 0, deleted: 0 }
+      let addAll = 0
+      let delAll = 0
+      for (const r of rows) {
+        if (r.kind !== 'committed') counts[r.kind as 'changed' | 'new' | 'deleted']++
+        addAll += Math.max(0, r.add)
+        delAll += Math.max(0, r.del)
+      }
+      const weight = (r: { add: number; del: number }) => Math.max(0, r.add) + Math.max(0, r.del)
+      const KIND_ORDER: Record<string, number> = { changed: 0, new: 1, deleted: 2, committed: 3 }
+      const editedAt = (r: Row) => dates!.disk.get(r.rel.toLowerCase()) ?? 0
+      const order = (a: Row, b: Row) =>
+        g.sort === 'newest' ? editedAt(b) - editedAt(a) || a.rel.localeCompare(b.rel)
+        : g.sort === 'lines' ? weight(b) - weight(a) || a.rel.localeCompare(b.rel)
+        : g.sort === 'kind' ? KIND_ORDER[a.kind]! - KIND_ORDER[b.kind]! || a.rel.localeCompare(b.rel)
+        : tab === 'changes' ? a.i - b.i // Changes: newest first, as it was
+        : a.rel.localeCompare(b.rel)
+      const shown = rows.filter(r => (g.kind === 'all' || r.kind === g.kind) && (!find || r.rel.toLowerCase().includes(find))).sort(order)
+      const set = (f: (x: GitList) => GitList) => void update($, gitListAtom, f)
+      const n = (x: number) => x.toLocaleString('en-US')
+      const lines = (r: { add: number; del: number }) => (r.add < 0 ? 'binary' : `+${n(r.add)} −${n(r.del)}`)
+
+      const fileRow = async (row: Row, depth: number, name: string) => {
+        const k = `${tab}:${row.rel}`
+        // when: edited on disk (green within a day, dim after a week), and its newest commit
+        const ed = row.kind === 'deleted' ? undefined : dates!.disk.get(row.rel.toLowerCase())
+        const cm = dates!.committed.get(row.rel.toLowerCase())
+        const tone = ed ? ageTone(ed, nowMs) : 'old'
+        const ago = (ms: number) => (age(ms, nowMs) === 'just now' ? 'just now' : `${age(ms, nowMs)} ago`)
+        return (
+          <Box key={`ch:${k}`} flexDirection="column">
+            {tableRow(
+              `chr:${k}`,
+              <Box flexDirection="row" gap={1} marginLeft={depth * 2}>
+                <Button key={`d:${k}`} label={`${diffOpen.has(k) ? '▾' : '▸'} ${kindOf(row.rel)[0]} ${name}`} plain onPress={() => void flipDiff(k)} />
+                {row.kind === 'deleted' ? null : (
+                  <Button key={`o:${k}`} label="Open" plain dimColor onPress={() => void (async () => {
+                    await showPane($, PANE)
+                    await openPath(row.path)
+                  })()} />
+                )}
+                {row.before ? (
+                  // Claude's own change: the file against the copy made before its first edit this session
+                  <Button key={`cl:${k}`} label="± Claude's" plain onPress={() => void (async () => {
+                    await update($, diffBaseAtom, () => ({ path: row.path, base: 'claude' }))
+                    await update($, diffOpenAtom, list => [...list.filter(x => x !== `filediff:${row.path}`), `filediff:${row.path}`].slice(-50))
+                    await showPane($, PANE)
+                    await openPath(row.path)
+                  })()} />
+                ) : null}
+              </Box>,
+              [
+                [<Text wrap="truncate-end" color={GIT_COLOR[tab === 'git' ? row.note : row.lb]}>{`● ${tab === 'git' ? row.note : row.st ? row.lb : 'committed'}`}</Text>, 10],
+                [lines(row), 12],
+                [ed ? <Text wrap="truncate-end" color={tone === 'new' ? 'success' : undefined} dimColor={tone !== 'new'}>{ago(ed)}</Text> : '', 11],
+                [cm ? ago(cm) : 'never', 11],
+              ],
+            )}
+            {tab === 'changes' ? <Text key={`tool:${k}`} wrap={wrapMode} dimColor>{`   ${row.note}`}</Text> : null}
+            {diffOpen.has(k) ? diffBlock(k, await fileDiff(root, row.rel, row.st === '??')) : null}
+          </Box>
+        )
+      }
+
+      const out = []
+      let more = ''
+      if (g.folders && !find) {
+        // 📁 a folder tree: each folder with its files' count and lines, folded until pressed; a folder holding
+        // just one folder shows as one (src/components). At most CHANGES_PAGE rows, then a note.
+        let left = CHANGES_PAGE
+        const openSet = new Set(g.open)
+        const small = shown.length <= CHANGES_PAGE // few files: everything unfolded
+        const walk = async (prefix: string, list: Row[], depth: number) => {
+          const dirs = new Map<string, Row[]>()
+          const here: Row[] = []
+          for (const r of list) {
+            const rest = r.rel.slice(prefix.length)
+            const cut = rest.indexOf('/')
+            if (cut < 0) here.push(r)
+            else dirs.set(rest.slice(0, cut), [...(dirs.get(rest.slice(0, cut)) ?? []), r])
+          }
+          const folders = [...dirs.entries()].map(([d, rs]) => {
+            // join single-folder chains: a/b/c with nothing else in a or a/b
+            let name = d
+            for (;;) {
+              const p = `${prefix}${name}/`
+              const subs = new Set(rs.map(r => r.rel.slice(p.length).split('/')[0]))
+              if (subs.size !== 1 || rs.some(r => !r.rel.slice(p.length).includes('/'))) break
+              name = `${name}/${[...subs][0]}`
+            }
+            return { name, rows: rs, add: rs.reduce((s, r) => s + Math.max(0, r.add), 0), del: rs.reduce((s, r) => s + Math.max(0, r.del), 0) }
+          })
+          folders.sort((a, b) => (g.sort === 'lines' ? weight(b) - weight(a) : 0) || a.name.localeCompare(b.name))
+          for (const f of folders) {
+            if (left <= 0) return
+            left--
+            const p = `${prefix}${f.name}/`
+            const isOpen = small || openSet.has(p)
+            out.push(
+              <Box key={`dir:${tab}:${p}`} flexDirection="row" gap={1} flexWrap="wrap" marginLeft={depth * 2}>
+                <Button key={`dir:${p}`} label={`${isOpen ? '▾' : '▸'} 📁 ${f.name}/`} plain onPress={() => set(x => ({ ...x, open: x.open.includes(p) ? x.open.filter(o => o !== p) : [...x.open, p].slice(-200) }))} />
+                <Text wrap={wrapMode} dimColor>{`${f.rows.length} file${f.rows.length === 1 ? '' : 's'} · +${n(f.add)} −${n(f.del)}`}</Text>
+              </Box>,
+            )
+            if (isOpen) await walk(p, f.rows, depth + 1)
+          }
+          for (const r of here) {
+            if (left <= 0) return
+            left--
+            out.push(await fileRow(r, depth, r.rel.slice(prefix.length)))
+          }
+        }
+        await walk('', shown, 0)
+        if (left <= 0) more = `Showing the first ${CHANGES_PAGE} rows: fold some folders, pick a kind, or 🔎 find, to see the rest.`
+      } else {
+        // ☰ a list (or 🔎 matches), a page at a time
+        const pages = Math.max(1, Math.ceil(shown.length / CHANGES_PAGE))
+        const page = Math.min(g.page, pages - 1)
+        for (const r of shown.slice(page * CHANGES_PAGE, (page + 1) * CHANGES_PAGE)) out.push(await fileRow(r, 0, r.rel))
+        if (pages > 1)
+          out.push(
+            <Box key="ch-pages" flexDirection="row" gap={1} flexWrap="wrap">
+              <Button key="ch-prev" label="◀ Previous" variant="secondary" onPress={() => set(x => ({ ...x, page: Math.max(0, page - 1) }))} />
+              <Text wrap={wrapMode} dimColor>{`Page ${page + 1} of ${pages} · ${page * CHANGES_PAGE + 1}-${Math.min(shown.length, (page + 1) * CHANGES_PAGE)} of ${shown.length}`}</Text>
+              <Button key="ch-next" label="Next ▶" variant="secondary" onPress={() => set(x => ({ ...x, page: Math.min(pages - 1, page + 1) }))} />
+            </Box>,
+          )
+      }
+
+      const kindName = { all: 'All', changed: 'Changed', new: 'New', deleted: 'Deleted' } as const
+      return (
+        <Box flexDirection="column" gap={1}>
           <Text wrap={wrapMode} dimColor>
             {tab === 'changes'
-              ? `${rows.length} file${rows.length === 1 ? '' : 's'} Claude edited this session (newest first); ▸ shows the diff against the last commit`
-              : `${branch ? `On ${branch} · ` : ''}${rows.length} changed or new file${rows.length === 1 ? '' : 's'}`}
+              ? `${rows.length} file${rows.length === 1 ? '' : 's'} Claude edited this session (newest first) · +${n(addAll)} −${n(delAll)} against the last commit; ▸ shows the diff`
+              : `${branch ? `On ${branch} · ` : ''}${rows.length} file${rows.length === 1 ? '' : 's'}: ${counts.changed} changed, ${counts.new} new, ${counts.deleted} deleted · +${n(addAll)} −${n(delAll)} lines`}
           </Text>
+          {rows.length ? (
+            <Box key="ch-tools" flexDirection="row" gap={1} flexWrap="wrap">
+              {/* the kinds there are (none when there's only one kind), one sort button that cycles, folders or a list */}
+              {(['all', 'changed', 'new', 'deleted'] as const).filter(kd => (kd === 'all' || counts[kd] > 0) && [counts.changed, counts.new, counts.deleted].filter(Boolean).length > 1).map(kd => (
+                <Button key={`ch-kind:${kd}`} label={`${kindName[kd]} ${counts[kd]}`} plain variant={g.kind === kd ? 'primary' : 'secondary'} onPress={() => set(x => ({ ...x, kind: kd, page: 0 }))} />
+              ))}
+              {(() => {
+                const order = tab === 'git' ? (['path', 'newest', 'lines', 'kind'] as const) : (['path', 'lines', 'kind'] as const)
+                const name = (o: string) => (o === 'path' ? (tab === 'changes' ? 'Newest' : 'Path') : o === 'newest' ? 'Recently edited' : o === 'lines' ? 'Most lines' : 'Kind')
+                const at = Math.max(0, (order as readonly string[]).indexOf(g.sort))
+                return <Button key="ch-sort" label={`↕ ${name(order[at]!)}`} plain onPress={() => set(x => ({ ...x, sort: order[(at + 1) % order.length]!, page: 0 }))} />
+              })()}
+              <Button key="ch-folders" label={g.folders ? '📁 Folders' : '☰ List'} plain onPress={() => set(x => ({ ...x, folders: !x.folders, page: 0 }))} />
+              {g.folders && g.open.length ? <Button key="ch-fold" label="Fold all" plain onPress={() => set(x => ({ ...x, open: [] }))} /> : null}
+              {find ? <Button key="ch-find-clear" label="✕ All" onPress={() => set(x => ({ ...x, find: '', page: 0 }))} /> : null}
+            </Box>
+          ) : null}
+          {(rows.length > 20 || find) && Input ? (
+            <Input key="ch-find" label="🔎" placeholder="Find by part of a path (Enter)" value={g.find} submitLabel="find" onSubmit={(v: string) => set(x => ({ ...x, find: v, page: 0 }))} />
+          ) : null}
+          {rows.length ? tableRow('ch-head', headCell('File'), [[headCell(tab === 'git' ? 'Kind' : 'In git'), 10], [headCell('Lines'), 12], [headCell('Edited'), 11], [headCell('Committed'), 11]]) : null}
+          {find || g.kind !== 'all' ? <Text wrap={wrapMode} dimColor>{`${shown.length} of ${rows.length} match${find ? ` "${find}"` : ''}${g.kind !== 'all' ? ` · ${kindName[g.kind].toLowerCase()} only` : ''}`}</Text> : null}
           {out}
+          {more ? <Text wrap={wrapMode} dimColor>{more}</Text> : null}
           {!rows.length ? <Text wrap={wrapMode} dimColor>{tab === 'changes' ? 'No edits yet this session.' : status ? 'Nothing changed since the last commit.' : 'Not a git folder.'}</Text> : null}
         </Box>
       )
@@ -1609,7 +2182,7 @@ export const register: Register = on => {
               ⚠ Errors and warnings only
             </Button>
             <Button key="log-open" onPress={() => void (async () => {
-              await update($, viewAtom, () => 'files')
+              await showPane($, PANE)
               await openPath(newest!.path)
             })()}>
               Open whole log
@@ -1642,7 +2215,7 @@ export const register: Register = on => {
             <Box key={`note:${p}`} flexDirection="column">
               <Box flexDirection="row" gap={1}>
                 <Button key={`no:${p}`} label={`${kindOf(p)[0]} ${p.split(/[\\/]/).pop()}`} plain onPress={() => void (async () => {
-                  await update($, viewAtom, () => 'files')
+                  await showPane($, PANE)
                   await openPath(p)
                 })()} />
                 <Text wrap={wrapMode} dimColor>{new Date(n.at).toLocaleString()}</Text>
@@ -1655,6 +2228,123 @@ export const register: Register = on => {
     }
 
     // Next: the sections of the project's notes that say what's next (open issues, to-dos, plans), editable
+    // ☑ Project's dashboard (Strike, 2026-11-11): one page of cards, each title opening its full page in place.
+    // Next (the project's next-steps section), Items (a bar per file), Checks (last results), Commits, Ticks today,
+    // and More (the rarer pages)
+    const overview = async (root: string, hasScripts: boolean) => {
+      const go = (k: ProjectTab) => () => void update($, tabAtom, () => k)
+      const bar = (done: number, total: number) => {
+        const n = total ? Math.round((done / total) * 10) : 0
+        return `${'█'.repeat(n)}${'░'.repeat(10 - n)}`
+      }
+      // Next: the first next-steps section of the handoff / next / todo docs, its first lines
+      let nextTitle = ''
+      let nextLines: string[] = []
+      for (const f of (await markdownFiles($, root)).filter(x => /(HANDOFF|NEXT|TODO|ROADMAP|README|PLAN)[^\\/]*\.md$/i.test(x))) {
+        const lines = (await $.fs.read(f).catch(() => '')).replace(/^\ufeff/, '').split(/\r?\n/)
+        const sec = sections(lines).find(x => x.level <= 3 && NEXT_HEADING.test(x.title))
+        if (sec) {
+          nextTitle = `${sec.title} · ${f.slice(root.length).replace(/^[\\/]/, '')}`
+          nextLines = lines.slice(sec.from + 1, sec.to).map(l => l.trim()).filter(l => l && !l.startsWith('#')).slice(0, 4)
+          break
+        }
+      }
+      // Items: open of total per file, the files with most open first
+      const files = await projectTasks($, root)
+      const openAll = files.reduce((n, f) => n + f.tasks.filter(t => !t.done).length, 0)
+      const byOpen = files
+        .map(f => ({ f, open: f.tasks.filter(t => !t.done).length, done: f.tasks.filter(t => t.done).length }))
+        .filter(x => x.open)
+        .sort((a, b) => b.open - a.open)
+        .slice(0, 6)
+      // Checks: the last result of each
+      const results = await read($, resultsAtom)
+      const checks = Object.entries(results)
+      // Commits: the newest five
+      const commits = (await repoOf($, root)) ? logFrom(await git(root, ['log', '-n', '5', LOG_FORMAT])) : []
+      // Ticks today
+      const today = new Date().toDateString()
+      const ticks = (await readTicks($)).filter(t => new Date(t.at).toDateString() === today && t.path.toLowerCase().startsWith(root.toLowerCase()))
+      const now = Date.now()
+      return (
+        <Box flexDirection="column" gap={1}>
+          {card('next', '🧭 Next', nextTitle || 'no next-steps section found', nextLines.length ? nextLines.map((l, i) => <Text key={`nx:${i}`} wrap={wrapMode}>{l}</Text>) : null, undefined, go('next'))}
+          {card(
+            'items',
+            '☑ Items',
+            `${openAll} open`,
+            byOpen.length
+              ? byOpen.map(x =>
+                  tableRow(
+                    `it:${x.f.path}`,
+                    <Text wrap="truncate-end">{x.f.path.slice(root.length).replace(/^[\\/]/, '')}</Text>,
+                    [
+                      [<Text color="success" wrap="truncate-end">{bar(x.done, x.done + x.open)}</Text>, 11],
+                      [`${x.done}/${x.done + x.open} done`, 13],
+                    ],
+                  ),
+                )
+              : <Text dimColor>Nothing open.</Text>,
+            undefined,
+            go('items'),
+          )}
+          {hasScripts
+            ? card(
+                'checks',
+                '▶ Checks',
+                checks.length ? `✓ ${checks.filter(([, r]) => r.ok).length}  ❌ ${checks.filter(([, r]) => !r.ok).length}` : 'not run yet',
+                checks.length ? (
+                  <Text wrap={wrapMode}>
+                    {checks.map(([k, r], i) => (
+                      <Text key={`ck:${k}`} color={r.ok ? 'success' : 'error'}>{`${i ? '   ' : ''}${r.ok ? '✓' : '❌'} ${k}`}</Text>
+                    ))}
+                  </Text>
+                ) : null,
+                undefined,
+                go('checks'),
+              )
+            : null}
+          {commits.length
+            ? card(
+                'commits',
+                '🕒 Commits',
+                `newest ${commits.length}`,
+                commits.map(c => tableRow(`oc:${c.sha}`, <Text wrap="truncate-end">{`${c.sha.slice(0, 7)} ${c.subject}`}</Text>, [[`${age(c.at, now)} ago`, 11]])),
+                undefined,
+                go('timeline'),
+              )
+            : null}
+          {card(
+            'ticks',
+            '📅 Ticks today',
+            `${ticks.length}`,
+            ticks.length ? ticks.slice(0, 3).map((t, i) => <Text key={`tk:${i}`} wrap="truncate-end" dimColor={t.done}>{`${t.done ? '☑' : '☐'} ${t.item.slice(0, 80)}`}</Text>) : null,
+            undefined,
+            go('ticks'),
+          )}
+          {card(
+            'more',
+            'More',
+            '',
+            <Box flexDirection="row" gap={1} flexWrap="wrap">
+              {(
+                [
+                  ['log', '📜 Log'],
+                  ['search', '🔍 Search'],
+                  ['backups', '🗂 Backups'],
+                  ['notes', '🗒 Notes'],
+                  ['features', '✨ Features'],
+                  ['blocks', '🧱 Building blocks'],
+                ] as [ProjectTab, string][]
+              ).map(([k, label]) => (
+                <Button key={`ov:${k}`} label={label} plain onPress={go(k)} />
+              ))}
+            </Box>,
+          )}
+        </Box>
+      )
+    }
+
     const nextView = async (root: string) => {
       const files = (await markdownFiles($, root)).filter(f => /(HANDOFF|NEXT|TODO|ROADMAP|README|PLAN)[^\\/]*\.md$/i.test(f))
       const cards = []
@@ -1691,8 +2381,8 @@ export const register: Register = on => {
                   />
                   <Box flexDirection="row" gap={1}>
                     <Button key={`nsave:${k}`} variant="primary" onPress={() => void (async () => {
-                      const next = (typed.get(k) ?? body.join('\n')).split(/\r?\n/)
-                      if (await replaceLines(f, s.from + 1, body, next)) await say(`Saved “${s.title}”.`)
+                      const newText = (typed.get(k) ?? body.join('\n')).split(/\r?\n/)
+                      if (await replaceLines(f, s.from + 1, body, newText)) await say(`Saved “${s.title}”.`)
                       await stopEdit()
                     })()}>
                       Save
@@ -1744,7 +2434,7 @@ export const register: Register = on => {
           {files.map(f => (
             <Box key={`sf:${f}`} flexDirection="column">
               <Button key={`so:${f}`} label={`${kindOf(f)[0]} ${f}`} plain onPress={() => void (async () => {
-                await update($, viewAtom, () => 'files')
+                await showPane($, PANE)
                 await openPath(join(root, f))
               })()} />
               {hits
@@ -1794,39 +2484,45 @@ export const register: Register = on => {
 
     const projectView = async () => {
       const root = await $.session.cwd()
-      const tab = await read($, tabAtom)
-      if (tab === 'log' && !logTimer) logTimer = $.clock.every(2000, () => $.ui.invalidate('ui.render'))
+      const saved = await read($, tabAtom)
+      const tab = saved === 'git' || saved === 'changes' ? 'next' : saved
+      // 📜 Log follows the file by a redraw every 2 s. The timer ends itself once the Log tab hasn't been drawn for 10 s
+      // (Files view, pane closed): it never outlives the tab
+      if (tab === 'log') logDrawnAt = await $.clock.now()
+      if (tab === 'log' && !logTimer)
+        logTimer = $.clock.every(2000, () => void (async () => {
+          if ((await $.clock.now()) - logDrawnAt > 10_000) {
+            logTimer?.cancel()
+            logTimer = null
+          } else $.ui.invalidate('ui.render')
+        })())
       if (tab !== 'log' && logTimer) {
         logTimer.cancel()
         logTimer = null
       }
       const all = await read($, allAtom)
-      const tabs: [typeof tab, string][] = [
-        ['next', '🧭 Next'],
-        ['items', '☑ Items'],
-        ['ticks', '📅 Ticks'],
-        ['timeline', '🕒 Timeline'],
-        ['features', '✨ Features'],
-        ['blocks', '🧱 Building blocks'],
-        ['changes', '✎ Changes'],
-        ['git', '🌿 Git'],
-        ['checks', '▶ Checks'],
-        ['search', '🔍 Search'],
-        ['backups', '🗂 Backups'],
-        ['log', '📜 Log'],
-        ['notes', '🗒 Notes'],
-      ]
-      const tabBar = (
+      // one row of tabs (Strike, 2026-11-11: no tabs in tabs); the rarer ones under More. Git and Claude's edits are
+      // the Git window's. Checks hides without a package.json (the /files command can still name it)
+      const hasScripts = await $.fs.exists(join(root, 'package.json')).catch(() => false)
+      const MAIN: [typeof tab, string][] = [['next', '🧭 Next'], ['items', '☑ Items'], ['ticks', '📅 Ticks'], ['timeline', '🕒 Timeline'], ['checks', '▶ Checks'], ['log', '📜 Log']]
+      const MORE: [typeof tab, string][] = [['search', '🔍 Search'], ['backups', '🗂 Backups'], ['notes', '🗒 Notes'], ['features', '✨ Features'], ['blocks', '🧱 Building blocks']]
+      const mainTabs = MAIN.filter(([k]) => k !== 'checks' || hasScripts || tab === 'checks')
+      const inMore = MORE.some(([k]) => k === tab)
+      const moreOpen = toggled.has('proj-more') || inMore
+      // one state change a press (each change is a whole redraw)
+      const pick = (k: typeof tab) => void update($, tabAtom, () => k)
+      const tabBar = tab === 'overview' ? null : (
         <Box flexDirection="row" gap={1} flexWrap="wrap">
-          {tabs.map(([k, label]) => (
-            <Button key={`tab:${k}`} variant={tab === k ? 'primary' : 'secondary'} onPress={() => void update($, tabAtom, () => k)}>
-              {label}
-            </Button>
+          <Button key="tab:overview" label="← Overview" plain onPress={() => pick('overview')} />
+          {[...mainTabs, ...(moreOpen ? MORE : [])].map(([k, label]) => (
+            <Button key={`tab:${k}`} label={compact ? label.split(' ')[0]! : label} plain variant={tab === k ? 'primary' : 'secondary'} onPress={() => pick(k)} />
           ))}
+          {inMore ? null : <Button key="tab-more" label={moreOpen ? '‹ Less' : 'More ›'} plain onPress={() => void flip('proj-more')} />}
         </Box>
       )
       let body
-      if (tab === 'items') {
+      if (tab === 'overview') body = await overview(root, hasScripts)
+      else if (tab === 'items') {
         const files = await projectTasks($, root)
         const total = files.reduce((n, f) => n + f.tasks.length, 0)
         const openCount = files.reduce((n, f) => n + f.tasks.filter(t => !t.done).length, 0)
@@ -1848,7 +2544,7 @@ export const register: Register = on => {
               return (
                 <Box key={`f:${f.path}`} flexDirection="column">
                   <Button key={`open:${f.path}`} label={`${kindOf(name)[0]} ${name}`} plain onPress={() => void (async () => {
-                    await update($, viewAtom, () => 'files')
+                    await showPane($, PANE)
                     await update($, asTextAtom, () => false)
                     await openPath(f.path)
                   })()} />
@@ -1903,7 +2599,7 @@ export const register: Register = on => {
                         {`${whenText(new Date(t.at).toISOString()).slice(11)} ${t.done ? '☑' : '☐ unticked'} ${t.item.slice(0, 90) || 'item'}${t.headings.length ? ` · ${t.headings.join(' › ')}` : ''}`}
                       </Text>
                       <Button key={`tko:${i}`} label={`${kindOf(t.path)[0]} ${nameOf(t.path)}`} plain onPress={() => void (async () => {
-                        await update($, viewAtom, () => 'files')
+                        await showPane($, PANE)
                         await update($, asTextAtom, () => false)
                         await openPath(t.path)
                       })()} />
@@ -1914,8 +2610,6 @@ export const register: Register = on => {
             {!log.length ? <Text wrap={wrapMode} dimColor>No ticks logged yet{everywhere ? '' : ' in this project'} (the log starts with Files pane 0.2.0).</Text> : null}
           </Box>
         )
-      } else if (tab === 'changes' || tab === 'git') {
-        body = await changesView(root, tab)
       } else if (tab === 'checks') {
         body = await checksView(root)
       } else if (tab === 'search') {
@@ -1948,8 +2642,13 @@ export const register: Register = on => {
                     })()}
                   />
                 )
-              return (
+              const relKey = `tl:rel:${root}#${x.line}`
+              const relOpen = x.kind === 'release' && toggled.has(relKey)
+              const row = (
               <Box key={`tlrow:${i}`} flexDirection="row" gap={1}>
+              {x.kind === 'release' && x.points?.length ? (
+                <Button key={`rel-fold:${i}`} label={relOpen ? '▾' : '▸'} plain onPress={() => void flip(relKey)} />
+              ) : null}
               <Text wrap={wrapMode} key={`tl:${i}`}>
                 <Text wrap={wrapMode} dimColor>{x.date || '—'} </Text>
                 {x.kind === 'release' ? (
@@ -1970,6 +2669,29 @@ export const register: Register = on => {
                 </Button>
               ) : null}
               </Box>
+              )
+              if (x.kind !== 'release' || !x.summary) return row
+              // what the version changed: a summary line, every point when unfolded
+              return (
+                <Box key={`tlrel:${i}`} flexDirection="column">
+                  {row}
+                  {relOpen ? (
+                    (x.points ?? []).slice(0, 60).map((p, j) => (
+                      <Text key={`tlp:${i}:${j}`} wrap={wrapMode} dimColor>
+                        {'   • '}
+                        {p}
+                      </Text>
+                    ))
+                  ) : (
+                    <Text key={`tls:${i}`} wrap={wrapMode} dimColor>
+                      {'   '}
+                      {x.summary}
+                    </Text>
+                  )}
+                  {relOpen && (x.points?.length ?? 0) > 60 ? (
+                    <Text key={`tlm:${i}`} wrap={wrapMode} dimColor>{`   …and ${x.points!.length - 60} more in CHANGELOG.md`}</Text>
+                  ) : null}
+                </Box>
               )
             })}
             {!list.length ? <Text wrap={wrapMode} dimColor>No git history or CHANGELOG.md versions here.</Text> : null}
@@ -2003,8 +2725,8 @@ export const register: Register = on => {
                     />
                     <Box flexDirection="row" gap={1}>
                       <Button key={`bsave:${ek}`} variant="primary" onPress={() => void (async () => {
-                        const next = (typed.get(ek) ?? b.raw.join('\n')).split(/\r?\n/)
-                        if (await replaceLines(file, b.from + 1, b.raw, next)) await say(`Saved “${b.title}”.`)
+                        const newText = (typed.get(ek) ?? b.raw.join('\n')).split(/\r?\n/)
+                        if (await replaceLines(file, b.from + 1, b.raw, newText)) await say(`Saved “${b.title}”.`)
                         await stopEdit()
                       })()}>
                         Save
@@ -2044,21 +2766,107 @@ export const register: Register = on => {
       )
     }
 
-    // which pane this chat runs: version and deploy time, and a newer deploy when there is one
+    // the top bar: Files | Project, ← → ↑ and the path as buttons, ⋯ for the rest (Wrap, Follow, Compact, Go to,
+    // version, Tools). Warnings that need a look (a newer pane, a conflict, Undo) show under it.
     const ver = await deployInfo($, home)
+    const menuOpen = await read($, menuAtom)
+    const nav = await read($, navAtom)
+    const missing = health ? health.filter(h => !h.ok) : []
+    const projectRoot = view !== 'files' ? await $.session.cwd() : ''
+    const crumbsOf = (p: string) => {
+      const out: { label: string; path: string }[] = []
+      for (let q = p, i = 0; q && i < 40; i++) {
+        const up = parent(q)
+        out.unshift({ label: up === q ? q.replace(/[\\/]+$/, '') : q.slice(Math.max(q.lastIndexOf('\\'), q.lastIndexOf('/')) + 1), path: q })
+        if (up === q) break
+        q = up
+      }
+      return out
+    }
+    const trail = crumbsOf(view === 'project' ? projectRoot : here)
+    // a long path: the drive, …, and the last three parts
+    const shownTrail = trail.length > 5 ? [trail[0]!, { label: '…', path: trail[trail.length - 4]!.path }, ...trail.slice(-3)] : trail
+    // 🕘 Recent ▾: pinned files, then the 8 opened last, in a short list under the bar while it's open
+    const pinnedAll = await read($, pinnedAtom)
+    const recentAll = (await read($, recentAtom)).filter(p => !NOT_FOLLOWED.test(p) && !pinnedAll.some(q => q.toLowerCase() === p.toLowerCase())).slice(0, 8)
+    const recentOpen = toggled.has('recent-open')
+    const recentList = recentOpen ? (
+      <Box key="recent-list" flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+        {[...pinnedAll.map(p => ({ p, star: true })), ...recentAll.map(p => ({ p, star: false }))].map(({ p, star }, i) => (
+          <Box key={`rl:${i}`} flexDirection="row" gap={1}>
+            <Button key={`recent:${i}`} label={`${star ? '⭐' : kindOf(p)[0]} ${p.split(/[\\/]/).pop()}`} plain onPress={() => void (async () => {
+              await flip('recent-open')
+              await openPath(p)
+            })()} />
+            <Text wrap="truncate-end" dimColor>{parent(p)}</Text>
+          </Box>
+        ))}
+      </Box>
+    ) : null
     const switcher = (
-      <Box flexDirection="column">
-        <Box flexDirection="row" gap={1} flexWrap="wrap">
-          <Button key="v-files" variant={view === 'files' ? 'primary' : 'secondary'} onPress={() => void update($, viewAtom, () => 'files')}>
-            Files
-          </Button>
-          <Button key="v-project" variant={view === 'project' ? 'primary' : 'secondary'} onPress={() => void update($, viewAtom, () => 'project')}>
-            Project
-          </Button>
-          <Button key="wrap" label={compact ? '↩' : wrap ? '↩ Wrap: on' : '↩ Wrap: off'} variant={wrap ? 'primary' : 'secondary'} onPress={() => void update($, wrapAtom, v => !v)} />
-          <Button key="follow" label={compact ? '👁' : follow ? '👁 Follow Claude: on' : '👁 Follow Claude: off'} variant={follow ? 'primary' : 'secondary'} onPress={() => void update($, followAtom, v => !v)} />
-          <Button key="compact" label={compact ? '▤ Full labels' : '▤ Compact'} variant={compact ? 'primary' : 'secondary'} onPress={() => void update($, compactAtom, v => !v)} />
+      <Box flexDirection="column" gap={1}>
+        <Box key="bar" flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">
+          {/* Files · Git · Project: one row, switched in place */}
+          {(['files', 'git', 'project'] as const).map(v => (
+            <Button key={`v-${v}`} label={v === 'files' ? '📁 Files' : v === 'git' ? '🌿 Git' : '☑ Project'} variant={view === v ? 'primary' : 'secondary'} onPress={() => void update($, viewAtom, () => v)} />
+          ))}
+          {view === 'files' && nav.back.length ? <Button key="nav-back" label="←" plain onPress={() => void goNav('back')} /> : null}
+          {view === 'files' && nav.fwd.length ? <Button key="nav-fwd" label="→" plain onPress={() => void goNav('fwd')} /> : null}
+          {view === 'files' && parent(here) !== here ? <Button key="up" label={open ? '↑ Folder' : '↑'} plain onPress={() => void goDir(parent(here))} /> : null}
+          <Box key="trail" flexDirection="row" gap={0} flexWrap="wrap" flexGrow={1}>
+            {(view === 'files' ? shownTrail : []).flatMap((c, i) => [
+              ...(i > 0 ? [<Text key={`ts${i}`} dimColor>{' › '}</Text>] : []),
+              <Button
+                key={`bc:${i}`}
+                label={c.label}
+                plain
+                variant={i === shownTrail.length - 1 ? 'primary' : 'secondary'}
+                onPress={() => void (async () => {
+                  await showPane($, PANE)
+                  await openPath(c.path)
+                })()}
+              />,
+            ])}
+          </Box>
+          {/* the other windows, a press away (each is its own tab in the dock once open) */}
+          {view === 'files' && !open ? <Button key="find-toggle" label="🔎" plain onPress={() => void flip('folder-find')} /> : null}
+          {view === 'files' && (pinnedAll.length || recentAll.length) ? <Button key="recent" label={recentOpen ? '🕘 Recent ▴' : '🕘 Recent ▾'} plain onPress={() => void flip('recent-open')} /> : null}
+          <Button key="menu" label={menuOpen ? '✕' : missing.length || ver.newer ? '⋯ ⚠' : '⋯'} plain onPress={() => void update($, menuAtom, v => !v)} />
         </Box>
+        {view === 'files' ? recentList : null}
+        {menuOpen ? (
+          <Box key="menu-body" flexDirection="column" gap={1} borderStyle="round" borderDimColor paddingX={1}>
+            <Box flexDirection="row" gap={1} flexWrap="wrap">
+              <Button key="wrap" label={wrap ? '↩ Wrap: on' : '↩ Wrap: off'} variant={wrap ? 'primary' : 'secondary'} onPress={() => void update($, wrapAtom, v => !v)} />
+              <Button key="follow" label={follow ? '👁 Follow Claude: on' : '👁 Follow Claude: off'} variant={follow ? 'primary' : 'secondary'} onPress={() => void (async () => {
+                await $.store.set('followClaude', !follow)
+                await say(follow ? 'Follow Claude is off (in every chat).' : "Follow Claude is on (in every chat): files Claude edits or reads open here.")
+              })()} />
+              <Button key="compact" label={compact ? '▤ Full labels' : '▤ Compact'} variant={compact ? 'primary' : 'secondary'} onPress={() => void update($, compactAtom, v => !v)} />
+            </Box>
+            {/* how diffs are drawn, everywhere */}
+              {Input ? (
+              <Input key="path" label="Go to" placeholder="a folder or file path (Enter)" value={here} submitLabel="go" onSubmit={(v: string) => void (async () => {
+                await showPane($, PANE)
+                await openPath(v.trim())
+              })()} />
+            ) : null}
+            <Text key="version" wrap={wrapMode} dimColor>
+              {`Files pane ${ver.version ? `v${ver.version}` : ''}${ver.at ? ` · deployed ${whenText(ver.at)}` : ' · run from its source folder'}`}
+            </Text>
+            {health ? (
+              // which outside programs are there: a missing one says what it's needed for
+              <Text key="health" wrap={wrapMode} dimColor={!missing.length} color={missing.length ? 'warning' : undefined}>
+                {`Tools: ${health.map(h => `${h.ok ? '✓' : '✗'} ${h.name}`).join(' · ')}${missing.length ? ` (missing: ${missing.map(h => `${h.name} for ${h.for}`).join('; ')})` : ''}`}
+              </Text>
+            ) : null}
+          </Box>
+        ) : null}
+        {ver.newer ? (
+          <Text key="newer" wrap={wrapMode} color="warning">
+            {`⬆ A newer pane was deployed ${whenText(ver.newer)}: open a new chat to get it.`}
+          </Text>
+        ) : null}
         {conflict ? (
           // Claude edited a file while the pane held unsaved typing for it
           <Box key="conflict" flexDirection="column">
@@ -2074,23 +2882,17 @@ export const register: Register = on => {
             </Box>
           </Box>
         ) : null}
-        <Text key="version" wrap={wrapMode} dimColor>
-          {`Files pane ${ver.version ? `v${ver.version}` : ''}${ver.at ? ` · deployed ${whenText(ver.at)}` : ' · run from its source folder'}`}
-        </Text>
-        {health ? (
-          // which outside programs are there: a missing one says what it's needed for
-          <Text key="health" wrap={wrapMode} dimColor={health.every(h => h.ok)} color={health.every(h => h.ok) ? undefined : 'warning'}>
-            {`Tools: ${health.map(h => `${h.ok ? '✓' : '✗'} ${h.name}`).join(' · ')}${health.some(h => !h.ok) ? ` (missing: ${health.filter(h => !h.ok).map(h => `${h.name} for ${h.for}`).join('; ')})` : ''}`}
-          </Text>
-        ) : null}
-        {ver.newer ? (
-          <Text key="newer" wrap={wrapMode} color="warning">
-            {`A newer pane was deployed ${whenText(ver.newer)}: new chats get it (this chat started without the folder watch, so it keeps the one it started with).`}
-          </Text>
-        ) : null}
         {undoBar}
       </Box>
     )
+    if (view === 'git')
+      return (
+        <Box flexDirection="column" gap={1}>
+          {switcher}
+          {message ? <Text wrap={wrapMode}>{message}</Text> : null}
+          {await gitPage(projectRoot)}
+        </Box>
+      )
     if (view === 'project')
       return (
         <Box flexDirection="column" gap={1}>
@@ -2099,24 +2901,89 @@ export const register: Register = on => {
         </Box>
       )
 
-    const recentNow = await read($, recentAtom)
+    // 👁 the lines of this file Claude read last: named, with those lines (up to 60) as numbered code
+    const agentRead = await read($, agentReadAtom)
+    const readBand = (() => {
+      if (!open || !agentRead || agentRead.path.toLowerCase() !== open.path.toLowerCase() || open.mode !== 'whole') return null
+      const all = open.text.split('\n')
+      const to = Math.min(agentRead.to, all.length)
+      const whole = agentRead.from <= 1 && to >= all.length
+      const lines = all.slice(agentRead.from - 1, Math.min(to, agentRead.from + 59))
+      return (
+        <Box key="read-band" flexDirection="column" borderStyle="round" borderColor="claude" paddingX={1}>
+          <Box flexDirection="row" gap={1} flexWrap="wrap">
+            <Text wrap={wrapMode} color="claude">
+              {`👁 Claude read ${whole ? 'all of it' : `lines ${agentRead.from}–${to}`} · ${new Date(agentRead.at).toLocaleTimeString()}`}
+            </Text>
+            <Button key="read-done" label="✕" plain onPress={() => void update($, agentReadAtom, () => null)} />
+          </Box>
+          {!whole && lines.length ? (
+            Code ? (
+              <Code key="read-lines" source={lines.join('\n')} startLine={agentRead.from} path={open.path} wrap={wrapMode} />
+            ) : (
+              <Text wrap={wrapMode}>{lines.join('\n')}</Text>
+            )
+          ) : null}
+          {!whole && to - agentRead.from + 1 > lines.length ? <Text wrap={wrapMode} dimColor>{`(the first ${lines.length} lines shown)`}</Text> : null}
+        </Box>
+      )
+    })()
+    // 🕘 History of the open file: its commits (each with its diff of this file), or blame (who changed which lines
+    // when, as runs of lines from one commit; 50 runs at most)
+    const fileHist = await read($, fileHistAtom)
+    const histPanel = await (async () => {
+      if (!open || !fileHist || fileHist.path.toLowerCase() !== open.path.toLowerCase()) return null
+      const top = await repoOf($, parent(open.path))
+      const relPath = top ? open.path.slice(top.length).replace(/^[\\/]/, '').replace(/\\/g, '/') : ''
+      const modes = (
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          <Text wrap={wrapMode} bold>🕘 History</Text>
+          <Button key="fh-log" label="Commits" variant={fileHist.mode === 'log' ? 'primary' : 'secondary'} onPress={() => void update($, fileHistAtom, h => (h ? { ...h, mode: 'log' as const } : h))} />
+          <Button key="fh-blame" label="Who changed each line" variant={fileHist.mode === 'blame' ? 'primary' : 'secondary'} onPress={() => void update($, fileHistAtom, h => (h ? { ...h, mode: 'blame' as const } : h))} />
+          <Button key="fh-close" label="✕" plain onPress={() => void update($, fileHistAtom, () => null)} />
+        </Box>
+      )
+      let body
+      if (!top) body = <Text wrap={wrapMode} dimColor>Not in a git repository.</Text>
+      else if (fileHist.mode === 'log') {
+        const commits = logFrom(await git(top, ['log', '--follow', '-n', '30', LOG_FORMAT, '--', relPath]))
+        const rows = []
+        for (const c of commits) rows.push(await commitRow(top, c, `file:${relPath}`, relPath))
+        body = commits.length ? rows : <Text wrap={wrapMode} dimColor>Never committed.</Text>
+      } else {
+        const runs = blameRuns(await git(top, ['blame', '--porcelain', '--', relPath]))
+        const now = Date.now()
+        body = runs.length ? (
+          [
+            ...runs.slice(0, CHANGES_PAGE).map((r, i) => {
+              const fresh = /^0+$/.test(r.sha)
+              const tone = fresh ? 'new' : ageTone(r.at, now)
+              return (
+                <Text key={`bl:${i}`} wrap={wrapMode} color={tone === 'new' ? 'success' : undefined} dimColor={tone === 'old'}>
+                  {`${r.from === r.to ? `line ${r.from}` : `lines ${r.from}–${r.to}`} · ${fresh ? 'not committed yet' : `${r.sha.slice(0, 7)} · ${r.author} · ${age(r.at, now)} ago · ${r.subject}`}`}
+                </Text>
+              )
+            }),
+            ...(runs.length > CHANGES_PAGE ? [<Text key="bl-more" wrap={wrapMode} dimColor>{`(the first ${CHANGES_PAGE} of ${runs.length} runs)`}</Text>] : []),
+          ]
+        ) : (
+          <Text wrap={wrapMode} dimColor>Never committed.</Text>
+        )
+      }
+      return (
+        <Box key="file-hist" flexDirection="column" gap={1} borderStyle="round" borderDimColor paddingX={1}>
+          {modes}
+          {body}
+        </Box>
+      )
+    })()
     const header = (
       <Box flexDirection="column" gap={1}>
         {switcher}
-        {Input ? (
-          <Input key="path" label="Path" value={open ? open.path : dir} submitLabel="go" onSubmit={(v: string) => void openPath(v.trim())} />
-        ) : (
-          <Text wrap={wrapMode}>{open ? open.path : dir}</Text>
-        )}
         {message ? <Text wrap={wrapMode}>{message}</Text> : null}
-        {open && recentNow.length > 1 ? (
-          // the files opened lately, as tabs: one press back to any of them
-          <Box key="file-tabs" flexDirection="row" gap={1} flexWrap="wrap">
-            {recentNow.slice(0, 8).map((p, i) => (
-              <Button key={`ft:${i}`} label={`${kindOf(p)[0]} ${p.split(/[\\/]/).pop()}`} plain variant={p.toLowerCase() === open.path.toLowerCase() ? 'primary' : 'secondary'} onPress={() => void openPath(p)} />
-            ))}
-          </Box>
-        ) : null}
+        {readBand}
+        {histPanel}
+        {/* (the files opened lately were tabs here until 0.4.9: 🕘 Recent ▾ in the bar has them) */}
       </Box>
     )
 
@@ -2126,7 +2993,18 @@ export const register: Register = on => {
     // a file's utilities: pin, copy its path, open it in VS Code or its own app
     const fileTools = (path: string) => {
       const isPinned = pinnedNow.some(p => p.toLowerCase() === path.toLowerCase())
+      // the file's main action here; the rest under its own ⋯ (one toolbar row a view: Strike, 2026-11-11)
+      const more = toggled.has('file-more')
+      const histOn = fileHist?.path.toLowerCase() === path.toLowerCase()
       return [
+        <Button key="fhist" label={compact ? '🕘' : '🕘 History'} variant={histOn ? 'primary' : 'secondary'} onPress={() => void update($, fileHistAtom, h => (h && h.path.toLowerCase() === path.toLowerCase() ? null : { path, mode: 'log' as const }))} />,
+        <Button key="file-more" label={more ? '✕' : '⋯'} plain onPress={() => void flip('file-more')} />,
+        ...(more ? fileMenu(path, isPinned) : []),
+      ]
+    }
+    const fileMenu = (path: string, isPinned: boolean) => {
+      return [
+        <Button key="reveal" label={compact ? '📂' : '📂 Explorer'} onPress={() => void $.process.run(['explorer.exe', `/select,${path}`])} />,
         <Button key="pin" onPress={() => void update($, pinnedAtom, list => (isPinned ? list.filter(p => p.toLowerCase() !== path.toLowerCase()) : [path, ...list].slice(0, 20)))}>
           {isPinned ? (compact ? '★' : '★ Unpin') : compact ? '☆' : '☆ Pin'}
         </Button>,
@@ -2160,9 +3038,6 @@ export const register: Register = on => {
         <Box flexDirection="column" gap={1}>
           {header}
           <Box flexDirection="row" gap={1} flexWrap="wrap">
-            <Button key="back" onPress={() => void goDir(parent(f.path))}>
-              {compact ? '←' : '← Folder'}
-            </Button>
             {Input ? (
               <Button key="as-text" onPress={() => void (async () => {
                 await update($, asTextAtom, () => true)
@@ -2171,9 +3046,6 @@ export const register: Register = on => {
                 Edit as text
               </Button>
             ) : null}
-            <Button key="reveal" onPress={() => void $.process.run(['explorer.exe', `/select,${f.path}`])}>
-              {compact ? '📂' : '📂 Show in Explorer'}
-            </Button>
             {fileTools(f.path)}
           </Box>
           {noteBlock(f.path)}
@@ -2189,6 +3061,13 @@ export const register: Register = on => {
       const diffKey = `filediff:${f.path}`
       const isSvg = /\.svg$/i.test(f.path)
       const shell = MODEL.test(f.path)
+      // ◀ ▶ through the pictures and models in the same folder, by name
+      const isPic = (n: string) => IMAGE.test(n) || /\.svg$/i.test(n) || MODEL.test(n)
+      const sibs = ((await $.fs.list(parent(f.path)).catch(() => [])) as { name: string; kind: string }[])
+        .filter(x => x.kind === 'file' && isPic(x.name))
+        .map(x => join(parent(f.path), x.name))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+      const at = sibs.findIndex(p => p.toLowerCase() === f.path.toLowerCase())
       let now: unknown = null
       let before: unknown = null
       let note = ''
@@ -2216,7 +3095,7 @@ export const register: Register = on => {
         // drawn once per file version (a model's render or Explorer's thumbnail can take seconds): kept in memory for
         // redraws and on disk (file-pane-cache\previews) for other chats; the first time it draws in the background
         // while the rest of the pane shows
-        const k = `${HEIMDALL.test(f.path) ? 'probe3' : shell ? 'shell' : 'image'}|${f.path}|${f.size}|${f.mtimeMs}`
+        const k = `${HEIMDALL.test(f.path) ? 'probe3' : shell ? 'shell2' : 'image2'}|${f.path}|${f.size}|${f.mtimeMs}`
         const got = previews.get(k)
         if (got === undefined && !drawing.has(k)) {
           drawing.add(k)
@@ -2271,10 +3150,18 @@ export const register: Register = on => {
             {sizeText(f.size)}
             {dims}
           </Text>
+          {sibs.length > 1 && at >= 0 ? (
+            <Box key="pic-nav" flexDirection="row" gap={1} alignItems="center">
+              <Button key="pic-prev" label="◀" onPress={() => void openPath(sibs[(at - 1 + sibs.length) % sibs.length]!)} />
+              <Text dimColor>{`${at + 1} of ${sibs.length} in this folder`}</Text>
+              <Button key="pic-next" label="▶" onPress={() => void openPath(sibs[(at + 1) % sibs.length]!)} />
+            </Box>
+          ) : null}
           <Box flexDirection="row" gap={1} flexWrap="wrap">
-            <Button key="back" onPress={() => void goDir(parent(f.path))}>
-              {compact ? '←' : '← Folder'}
-            </Button>
+            {/^[A-Za-z]:[\\/]/.test(f.path) ? (
+              // its own app (Photos, Heimdall3D's viewer…), as a double click in Explorer would; absolute paths only
+              <Button key="open-app" label={compact ? '⤢' : '⤢ Open in its app'} onPress={() => void $.process.run(['explorer.exe', f.path], { timeoutMs: 15_000 }).then(() => say('Opened in its own app.'))} />
+            ) : null}
             <Button key="diff" variant={showDiff.includes(diffKey) ? 'primary' : 'secondary'} onPress={() => void flipDiffFile(diffKey)}>
               ± Diff
             </Button>
@@ -2286,9 +3173,6 @@ export const register: Register = on => {
                 Edit as text
               </Button>
             ) : null}
-            <Button key="reveal" onPress={() => void $.process.run(['explorer.exe', `/select,${f.path}`])}>
-              {compact ? '📂' : '📂 Show in Explorer'}
-            </Button>
             {shell ? <Button key="zoom" label={`🔍 Closer${zoom > 1 ? ` (${zoom}×)` : ''}`} variant={zoom > 1 ? 'primary' : 'secondary'} onPress={() => void update($, previewZoomAtom, z => (z >= 2 ? 1 : z === 1 ? 1.5 : 2))} /> : null}
             {fileTools(f.path)}
           </Box>
@@ -2317,7 +3201,7 @@ export const register: Register = on => {
       const f = open
       const saved = await read($, binViewAtom)
       const bv: BinView = saved.path === f.path ? saved : { path: f.path, mode: 'info', at: 0 }
-      const setBv = (next: Partial<BinView>) => update($, binViewAtom, () => ({ ...bv, ...next }))
+      const setBv = (change: Partial<BinView>) => update($, binViewAtom, () => ({ ...bv, ...change }))
       // kept per file version and page: a redraw (any click) doesn't read the file again
       const binKey = `${f.path}|${f.mtimeMs}|${bv.mode}|${bv.at}`
       const programs = (await $.env.get('ProgramFiles')) ?? ''
@@ -2434,12 +3318,6 @@ export const register: Register = on => {
         <Box flexDirection="column" gap={1}>
           {header}
           <Box flexDirection="row" gap={1} flexWrap="wrap">
-            <Button key="back" onPress={() => void goDir(parent(f.path))}>
-              {compact ? '←' : '← Folder'}
-            </Button>
-            <Button key="reveal" onPress={() => void $.process.run(['explorer.exe', `/select,${f.path}`])}>
-              {compact ? '📂' : '📂 Show in Explorer'}
-            </Button>
             {fileTools(f.path)}
           </Box>
           <Box flexDirection="row" gap={1} flexWrap="wrap">
@@ -2643,9 +3521,6 @@ export const register: Register = on => {
             {f.binary ? ' · binary: view only' : ' · Shift+Enter for a new line'}
           </Text>
           <Box flexDirection="row" gap={1} flexWrap="wrap">
-            <Button key="back" onPress={() => void goDir(parent(f.path))}>
-              {compact ? '←' : '← Folder'}
-            </Button>
             {!f.binary && Input && (
               <Button key="save" variant="primary" onPress={() => void save(f)}>
                 Save
@@ -2666,9 +3541,6 @@ export const register: Register = on => {
                 Page ›
               </Button>
             ) : null}
-            <Button key="reveal" onPress={() => void $.process.run(['explorer.exe', `/select,${f.path}`])}>
-              {compact ? '📂' : '📂 Show in Explorer'}
-            </Button>
             {fileTools(f.path)}
             <Button key="diff" variant={showDiff.includes(diffKey) ? 'primary' : 'secondary'} onPress={() => void flipDiffFile(diffKey)}>
               ± Diff
@@ -2777,14 +3649,6 @@ export const register: Register = on => {
     entries.sort((a, b) =>
       sortBy === 'size' ? b.size - a.size || a.name.localeCompare(b.name) : sortBy === 'date' ? (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0) : a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1,
     )
-    // the folder's path, each part a button to go there
-    const crumbs: { label: string; path: string }[] = []
-    for (let p = dir, i = 0; p && i < 40; i++) {
-      const up = parent(p)
-      crumbs.unshift({ label: up === p ? p.replace(/[\\/]+$/, '') : p.slice(Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/')) + 1), path: p })
-      if (up === p) break
-      p = up
-    }
     step('reading pinned files')
     const pinned = await read($, pinnedAtom)
     const recent = await read($, recentAtom)
@@ -2793,88 +3657,152 @@ export const register: Register = on => {
     step('checking git')
     try {
       if (!(await repoOf($, dir))) throw new Error('not in a git repository')
-      const r = await $.process.run(['git', '-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-uall', '--', '.'], { cwd: dir, timeoutMs: 10_000 })
-      const top = (await $.process.run(['git', 'rev-parse', '--show-prefix'], { cwd: dir, timeoutMs: 5_000 })).stdout.trim()
-      for (const l of r.stdout.split(/\r?\n/)) {
+      // (through the kept git answers, like the Git page: no git run on every redraw)
+      const status = await git(dir, ['status', '--porcelain=v1', '-uall', '--', '.'])
+      const top = (await git(dir, ['rev-parse', '--show-prefix'])).trim()
+      // every path under this folder, and each folder on the way to it (changed when anything under it is), so the
+      // tree's deeper rows have their state too; keys are paths relative to this folder, lower case, with /
+      for (const l of status.split(/\r?\n/)) {
         if (l.length < 4) continue
         const relPath = l.slice(3).replace(/^"|"$/g, '')
         const inside = top && relPath.toLowerCase().startsWith(top.toLowerCase()) ? relPath.slice(top.length) : relPath
-        const first = inside.split('/')[0]!.toLowerCase()
         const x = l.slice(0, 2)
         const st = x === '??' ? 'new' : x.includes('D') ? 'deleted' : 'changed'
-        if (!gitHere.has(first) || st === 'changed') gitHere.set(first, inside.includes('/') ? 'changed' : st)
+        const parts = inside.toLowerCase().split('/')
+        for (let i = 1; i < parts.length; i++) gitHere.set(parts.slice(0, i).join('/'), 'changed')
+        gitHere.set(parts.join('/'), st)
       }
     } catch {
       /* not a git folder */
     }
+    // 🌳 the folder as a tree: a folder's ▸ opens it in place (its rows under it, indented), at most `limit` rows in
+    // all; folders show their total size (counted in the background, kept 5 minutes)
+    const sizeOf = (base: string, x: { name: string; kind: string; size: number }) => (x.kind === 'dir' ? (dirSizes.get(join(base, x.name).toLowerCase())?.bytes ?? -1) : x.size)
+    const order = (base: string) => (a: { name: string; kind: string; size: number; mtimeMs?: number }, b: { name: string; kind: string; size: number; mtimeMs?: number }) =>
+      sortBy === 'size' ? sizeOf(base, b) - sizeOf(base, a) || a.name.localeCompare(b.name) : sortBy === 'date' ? (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0) : a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1
+    type TreeRow = { name: string; path: string; rel: string; kind: string; size: number; mtimeMs?: number; depth: number }
+    const treeOpen = new Set(await read($, treeOpenAtom))
+    const anyOpen = treeOpen.size > 0
+    const flipTree = (path: string) => update($, treeOpenAtom, list => (list.includes(path.toLowerCase()) ? list.filter(x => x !== path.toLowerCase()) : [...list, path.toLowerCase()].slice(-1000)))
+    // ⊞ Open all: every folder under this one, level by level, each marked open on its own (so ▾ folds any of them),
+    // until 400 rows or 300 folders (the rows come a page at a time); links and junctions aren't followed
+    const openAll = async () => {
+      const found: string[] = []
+      let rowsSeen = 0
+      let level = [dir]
+      while (level.length && rowsSeen < 400 && found.length < 300) {
+        const deeper: string[] = []
+        for (const d of level) {
+          const kids = await $.fs.list(d).catch(() => [] as { name: string; kind: string; isLink?: boolean }[])
+          rowsSeen += kids.length
+          for (const k of kids) if (k.kind === 'dir' && !k.isLink) deeper.push(join(d, k.name))
+          if (rowsSeen >= 400) break
+        }
+        for (const d of deeper.slice(0, 300 - found.length)) found.push(d.toLowerCase())
+        level = deeper
+      }
+      await update($, treeOpenAtom, list => [...new Set([...list, ...found])].slice(-1000))
+    }
+    const treeRows: TreeRow[] = []
+    const addRows = async (list: { name: string; kind: string; size: number; mtimeMs?: number }[], base: string, relBase: string, depth: number) => {
+      for (const x of [...list].sort(order(base))) {
+        if (treeRows.length > limit + LIST) return
+        const path = join(base, x.name)
+        const rel = relBase ? `${relBase}/${x.name}` : x.name
+        treeRows.push({ name: x.name, path, rel, kind: x.kind, size: x.size, mtimeMs: x.mtimeMs, depth })
+        // open: pressed open, or ⊞ Open all for this folder (three levels deep; the rows come a page at a time)
+        if (x.kind === 'dir' && treeOpen.has(path.toLowerCase()) && depth < 40) await addRows(await $.fs.list(path).catch(() => []), path, rel, depth + 1)
+      }
+    }
+    await addRows(entries, dir, '', 0)
+    const stale = treeRows.filter(r => r.kind === 'dir').map(r => r.path).filter(d => {
+      const c = dirSizes.get(d.toLowerCase())
+      return !c || Date.now() - c.at > 300_000
+    })
+    if (stale.length && !dirSizing) {
+      dirSizing = true
+      const want = stale.slice(0, 60)
+      void (async () => {
+        // Everything's index first (instant, when es.exe is in Program Files\Everything), the helper's count for the rest
+        const fromIndex = await everythingSizes($, [...new Set(want.map(d => parent(d)))])
+        const rest = want.filter(d => !fromIndex.has(d.toLowerCase()))
+        const r = rest.length ? await helper(['dirsizes', ...rest]) : {}
+        dirSizing = false
+        const got = (r.sizes ?? {}) as Record<string, { bytes: number; files: number; partial: boolean }>
+        // a folder neither answered (Node missing, an error) is kept as unknown (−1) for its 5 minutes too, so a
+        // failing count isn't asked again on every redraw
+        for (const d of want) {
+          const indexed = fromIndex.get(d.toLowerCase())
+          dirSizes.set(d.toLowerCase(), { ...(indexed !== undefined ? { bytes: indexed, files: 0, partial: false } : (got[d] ?? { bytes: -1, files: 0, partial: false })), at: Date.now() })
+        }
+        if (dirSizes.size > 2000) dirSizes.delete(dirSizes.keys().next().value!)
+        $.ui.invalidate('ui.render')
+      })()
+    }
     return (
       <Box flexDirection="column" gap={1}>
         {header}
-        <Box key="crumbs" flexDirection="row" gap={0} flexWrap="wrap">
-          {crumbs.flatMap((c, i) => [
-            ...(i > 0 ? [<Text key={`bcs${i}`} dimColor>{' › '}</Text>] : []),
-            <Button key={`bc:${i}`} label={c.label} plain variant={i === crumbs.length - 1 ? 'primary' : 'secondary'} onPress={() => void goDir(c.path)} />,
-          ])}
-        </Box>
-        <Box flexDirection="row" gap={1} flexWrap="wrap">
-          <Button key="up" label={compact ? '↑' : '↑ Up'} onPress={() => void goDir(parent(dir))} />
-          <Text wrap={wrapMode} dimColor>
-            {listError ? `Can't list it: ${listError}` : folderFind ? `${entries.length} of ${total} match "${folderFind}"` : `${total} item${total === 1 ? '' : 's'}`}
-          </Text>
-          <Text dimColor>Sort:</Text>
-          {(['name', 'size', 'date'] as const).map(s => (
-            <Button key={`sort:${s}`} label={s === 'name' ? 'Name' : s === 'size' ? 'Size' : 'Date'} variant={sortBy === s ? 'primary' : 'secondary'} onPress={() => void update($, sortAtom, () => s)} />
-          ))}
-          {folderFind ? <Button key="find-clear" label="✕ All" onPress={() => void update($, folderFindAtom, () => '')} /> : null}
-        </Box>
-        {Input ? (
-          <Input
-            key="folder-find"
-            label="🔎"
-            placeholder="Find in this folder by part of a name (Enter)"
-            value={folderFind}
-            submitLabel="find"
-            onSubmit={(v: string) => void update($, folderFindAtom, () => v)}
-          />
-        ) : null}
-        {pinned.length || recent.length ? (
-          <Box flexDirection="column">
-            {pinned.length ? <Text wrap={wrapMode} dimColor>Pinned</Text> : null}
-            {pinned.map(p => (
-              <Box key={`pinrow:${p}`} flexDirection="row" gap={1}>
-                <Button key={`pin:${p}`} label={`⭐ ${p.split(/[\\/]/).pop()}`} plain onPress={() => void openPath(p)} />
-                <Text wrap={wrapMode} dimColor>{parent(p)}</Text>
-              </Box>
-            ))}
-            {recent.some(p => !pinned.includes(p)) ? <Text wrap={wrapMode} dimColor>Recently opened</Text> : null}
-            {recent
-              .filter(p => !pinned.includes(p))
-              .slice(0, 5)
-              .map(p => (
-                <Box key={`recrow:${p}`} flexDirection="row" gap={1}>
-                  <Button key={`rec:${p}`} label={`${kindOf(p)[0]} ${p.split(/[\\/]/).pop()}`} plain onPress={() => void openPath(p)} />
-                  <Text wrap={wrapMode} dimColor>{parent(p)}</Text>
+        {card(
+          'folder',
+          `📁 ${dir.split(/[\\/]/).filter(Boolean).pop() ?? dir}`,
+          listError ? '' : folderFind ? `${entries.length} of ${total} match "${folderFind}"` : `${total} item${total === 1 ? '' : 's'}`,
+          [
+            listError ? <Text key="list-error" wrap={wrapMode} color="error">{`Can't list it: ${listError}`}</Text> : null,
+            // 🔎 only where there's something to find in (more than 20 entries), or while a search is on
+            Input && (total > 20 || folderFind || toggled.has('folder-find')) ? (
+              <Box key="find-row" flexDirection="row" gap={1}>
+                <Box flexGrow={1}>
+                  <Input key="folder-find" label="🔎" placeholder="Find by part of a name (Enter)" value={folderFind} submitLabel="find" onSubmit={(v: string) => void update($, folderFindAtom, () => v)} />
                 </Box>
-              ))}
-          </Box>
-        ) : null}
-        <Box flexDirection="column">
-          {entries.slice(0, limit).map(x => {
-            const [icon, color] = x.kind === 'dir' ? ['📁', 'warning'] : kindOf(x.name)
-            const g = gitHere.get(x.name.toLowerCase())
-            return (
-              <Box key={`row:${x.name}`} flexDirection="row" gap={1}>
-                <Button key={`e:${x.name}`} label={`${icon} ${x.name}`} plain onPress={() => void (x.kind === 'dir' ? goDir(join(dir, x.name)) : openPath(join(dir, x.name)))} />
-                {x.kind === 'file' ? <Text wrap={wrapMode} dimColor>{sizeText(x.size)}</Text> : null}
-                {x.mtimeMs && !compact ? <Text wrap={wrapMode} dimColor>{new Date(x.mtimeMs).toLocaleDateString()}</Text> : null}
-                {g ? <Text wrap={wrapMode} color={GIT_COLOR[g]}>● {g}</Text> : color && x.kind === 'file' ? <Text wrap={wrapMode} color={color}>●</Text> : null}
+                {folderFind ? <Button key="find-clear" label="✕ All" plain onPress={() => void update($, folderFindAtom, () => '')} /> : null}
               </Box>
-            )
-          })}
-        </Box>
-        {entries.length > limit ? (
-          <Button key="more" label={`Show ${Math.min(LIST, entries.length - limit)} more`} onPress={() => void update($, shownAtom, n => n + LIST)} />
-        ) : null}
+            ) : null,
+            // ⊞ Open all (three levels) / ⊟ Fold all, where there are folders to open
+            entries.some(x => x.kind === 'dir') ? (
+              <Box key="tree-tools" flexDirection="row" gap={1}>
+                <Button key="tree-open-all" label="⊞ Open all" plain onPress={() => void openAll()} />
+                {anyOpen ? <Button key="tree-fold-all" label="⊟ Fold all" plain onPress={() => void update($, treeOpenAtom, () => [])} /> : null}
+              </Box>
+            ) : null,
+            // the header: each column's label sorts by it
+            tableRow(
+              'folder-head',
+              <Button key="sort:name" label={sortBy === 'name' ? 'Name ▾' : 'Name'} plain variant={sortBy === 'name' ? 'primary' : 'secondary'} onPress={() => void update($, sortAtom, () => 'name')} />,
+              [
+                [<Button key="sort:size" label={sortBy === 'size' ? 'Size ▾' : 'Size'} plain variant={sortBy === 'size' ? 'primary' : 'secondary'} onPress={() => void update($, sortAtom, () => 'size')} />, 9],
+                [<Button key="sort:date" label={sortBy === 'date' ? 'Modified ▾' : 'Modified'} plain variant={sortBy === 'date' ? 'primary' : 'secondary'} onPress={() => void update($, sortAtom, () => 'date')} />, 12],
+                [headCell('Git'), 10],
+              ],
+            ),
+            ...treeRows.slice(limit, limit + LIST).map(x => {
+              const [icon, color] = x.kind === 'dir' ? ['📁', 'warning'] : kindOf(x.name)
+              const g = gitHere.get(x.rel.toLowerCase())
+              const now = Date.now()
+              const tone = x.mtimeMs ? ageTone(x.mtimeMs, now) : 'old'
+              const isOpen = treeOpen.has(x.path.toLowerCase())
+              const ds = x.kind === 'dir' ? dirSizes.get(x.path.toLowerCase()) : undefined
+              return tableRow(
+                `row:${x.rel}`,
+                <Box flexDirection="row" gap={0} marginLeft={x.depth * 2}>
+                  {x.kind === 'dir' ? <Button key={`tg:${x.rel}`} label={isOpen ? '▾' : '▸'} plain dimColor onPress={() => void flipTree(x.path)} /> : <Text>{'  '}</Text>}
+                  <Button key={`e:${x.rel}`} label={`${icon} ${x.name}`} plain onPress={() => void (x.kind === 'dir' ? goDir(x.path) : openPath(x.path))} />
+                </Box>,
+                [
+                  [x.kind === 'file' ? sizeText(x.size) : !ds ? '…' : ds.bytes < 0 ? '—' : `${ds.partial ? '≥ ' : ''}${sizeText(ds.bytes)}`, 9],
+                  [x.mtimeMs ? <Text wrap="truncate-end" color={tone === 'new' ? 'success' : undefined} dimColor={tone !== 'new'}>{`${age(x.mtimeMs, now)}${age(x.mtimeMs, now) === 'just now' ? '' : ' ago'}`}</Text> : '', 12],
+                  [g ? <Text wrap="truncate-end" color={GIT_COLOR[g]}>{`● ${g}`}</Text> : color && x.kind === 'file' ? <Text color={color}>●</Text> : '', 10],
+                ],
+              )
+            }),
+            limit > 0 || treeRows.length > limit + LIST ? (
+              <Box key="folder-pages" flexDirection="row" gap={1}>
+                {limit > 0 ? <Button key="rows-prev" label="◀ Previous" plain onPress={() => void update($, shownAtom, n => Math.max(0, n - LIST))} /> : null}
+                <Text dimColor>{`rows ${limit + 1}-${Math.min(treeRows.length, limit + LIST)}`}</Text>
+                {treeRows.length > limit + LIST ? <Button key="rows-next" label="Next ▶" plain onPress={() => void update($, shownAtom, n => n + LIST)} /> : null}
+              </Box>
+            ) : null,
+          ],
+        )}
       </Box>
     )
     } catch (err) {
@@ -2886,7 +3814,7 @@ export const register: Register = on => {
           <Text color="error">The Files pane couldn't draw this view:</Text>
           <Text>{why}</Text>
           <Button key="reset" onPress={() => void (async () => {
-            await update($, viewAtom, () => 'files')
+            await showPane($, PANE)
             await update($, openAtom, () => null)
             await update($, dirAtom, () => '')
           })()}>

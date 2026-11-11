@@ -334,6 +334,50 @@ try {
     const dir = path.resolve(a[0]), f = path.resolve(a[1]);
     if (path.dirname(f).toLowerCase() !== dir.toLowerCase() || !/^last-commit-\d+\.[A-Za-z0-9]{1,8}$/.test(path.basename(f))) out({ error: 'not a pane temp file' });
     else { fs.rmSync(f, { force: true }); out({ ok: true }); }
+  } else if (cmd === 'dirsizes') {
+    // dirsizes <folder>…: each folder's total size and file count, walked without following links or junctions
+    // (no loops), all of them within 15 s and 400,000 entries; a folder cut short says partial
+    const deadline = Date.now() + 15000;
+    let budget = 400000;
+    const sizes = {};
+    for (const top of a.slice(0, 200)) {
+      let bytes = 0, files = 0, partial = false;
+      const stack = [top];
+      while (stack.length) {
+        if (Date.now() > deadline || budget <= 0) { partial = true; break; }
+        const d = stack.pop();
+        let list = [];
+        try { list = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+        for (const x of list) {
+          budget--;
+          const f = path.join(d, x.name);
+          if (x.isSymbolicLink()) continue;
+          if (x.isDirectory()) stack.push(f);
+          else if (x.isFile()) { try { bytes += fs.lstatSync(f).size; files++; } catch { /* gone */ } }
+        }
+      }
+      sizes[top] = { bytes, files, partial };
+    }
+    out({ ok: true, sizes });
+  } else if (cmd === 'lines') {
+    // lines <root>, stdin a JSON list of paths under it: each file's line count (-1: binary, over 16 MB, outside, gone)
+    const root = path.resolve(a[0]), counts = {};
+    for (const rel of JSON.parse(fs.readFileSync(0, 'utf8') || '[]').slice(0, 5000)) {
+      const f = path.resolve(root, String(rel));
+      let n = -1;
+      try {
+        if (f.toLowerCase().startsWith(root.toLowerCase() + path.sep) && fs.statSync(f).size <= 16 * 1024 * 1024) {
+          const b = fs.readFileSync(f);
+          if (!b.subarray(0, 8000).includes(0)) {
+            n = 0;
+            for (let i = 0; i < b.length; i++) if (b[i] === 10) n++;
+            if (b.length && b[b.length - 1] !== 10) n++;
+          }
+        }
+      } catch { /* gone or unreadable: -1 */ }
+      counts[rel] = n;
+    }
+    out({ ok: true, counts });
   } else if (cmd === 'restore') {
     swap(a[1], fs.readFileSync(a[0]));
     out({ ok: true });

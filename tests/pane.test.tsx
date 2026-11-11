@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { wordDiff } from '../hooks/project'
+import { age, ageTone, blameRuns, branchesFrom, graphRows, lastCommitByFile, logFrom, releasesFrom, wordDiff } from '../hooks/project'
 
 // The Files pane drawn as the desktop app draws it, in a folder like the one where it stayed blank
 // (F:\GT racing IPAD: not a git repository, one links.txt). The engine's answers are this test's hooks.
@@ -18,7 +18,32 @@ const PANE = {
 } as const
 
 const CWD = 'F:\\GT racing IPAD'
-const TABS = ['next', 'items', 'ticks', 'timeline', 'features', 'blocks', 'changes', 'git', 'checks', 'search', 'backups', 'log', 'notes']
+const TABS = ['next', 'items', 'ticks', 'timeline', 'checks', 'log', 'search', 'backups', 'notes', 'features', 'blocks']
+// three windows since 2026-11-11: Files (PANE), Git, Project
+const GIT = { ...PANE, requestId: 'file-pane-git', props: { ...PANE.props, title: 'Git' } } as const
+const PROJECT = { ...PANE, requestId: 'file-pane-project', props: { ...PANE.props, title: 'Project' } } as const
+type Ui = { press: (q: { key: string }) => Promise<unknown>; find: (q: { key: string }) => Promise<unknown>; drawn: () => Promise<unknown> }
+/** A Project tab: in the row, or after More; false when it hides here (Checks without a package.json). */
+async function openTab(ui: Ui, t: string): Promise<boolean> {
+  // on the dashboard (no tab row): its Items card's title opens a full page, which has the row
+  if (!(await ui.find({ key: `tab:${t}` })) && (await ui.find({ key: 'card-go:items' }))) {
+    await ui.press({ key: 'card-go:items' })
+    for (let i = 0; i < 20 && !(await ui.find({ key: 'tab:overview' })); i++) await ui.drawn()
+  }
+  if (!(await ui.find({ key: `tab:${t}` })) && (await ui.find({ key: 'tab-more' }))) {
+    await ui.press({ key: 'tab-more' })
+    for (let i = 0; i < 20 && !(await ui.find({ key: `tab:${t}` })); i++) await ui.drawn()
+  }
+  if (!(await ui.find({ key: `tab:${t}` }))) return false
+  await ui.press({ key: `tab:${t}` })
+  for (let i = 0; i < 5; i++) await ui.drawn()
+  return true
+}
+/** A folded section of the Git window opened (uncommitted, claude, branches). */
+async function openSection(ui: Ui, key: string): Promise<void> {
+  await ui.press({ key: `sec-btn:${key}` })
+  for (let i = 0; i < 10; i++) await ui.drawn()
+}
 
 test('every view of the Files pane draws in a non-git folder with one file', async ($, on) => {
   on('command.register', () => ({ value: { command: 'files' } }))
@@ -45,6 +70,7 @@ test('every view of the Files pane draws in a non-git folder with one file', asy
   })
   on('store.get', () => ({ value: undefined }))
   on('clock.sleep', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: 1_000_000 }))
   on('process.run', () => ({ value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }))
 
   await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
@@ -58,20 +84,27 @@ test('every view of the Files pane draws in a non-git folder with one file', asy
   await clean('files')
   expect(await ui.find({ type: 'Button', text: /links\.txt/ })).toBeDefined()
 
-  // every Project tab
-  await ui.press({ key: 'v-project' })
-  for (const t of TABS) {
-    await ui.press({ key: `tab:${t}` })
-    await clean(`project tab ${t}`)
+  // every Project tab, in the Project window (Checks hides: no package.json); the Git window says there's no repo
+  const proj = await $.ui.mount({ ...PROJECT, surface: 'desktop' })
+  const cleanIn = async (w: typeof proj, where: string) => {
+    const bad = await w.find({ text: /couldn't draw/ })
+    if (bad) throw new Error(`${where}: ${(await w.findAll({ text: /./ })).map(x => x.text).join(' | ').slice(0, 600)}`)
   }
+  for (const t of TABS) {
+    expect(await openTab(proj, t)).toBe(t !== 'checks')
+    await cleanIn(proj, `project tab ${t}`)
+  }
+  const gitWin = await $.ui.mount({ ...GIT, surface: 'desktop' })
+  await cleanIn(gitWin, 'git window')
+  expect(await gitWin.find({ text: /isn't in a git repository/ })).toBeDefined()
 
-  // back to Files, open the file
-  await ui.press({ key: 'v-files' })
+  // open the file
   await ui.press({ key: 'e:links.txt' })
   await clean('the open file')
   expect(await ui.find({ type: 'Button', text: /Save/ })).toBeDefined()
 
-  // ↩ Wrap: on by default, shown in every view, flips off and back; every view still draws both ways
+  // ↩ Wrap: on by default, in the ⋯ menu (it stays open), flips off and back; every view still draws both ways
+  await ui.press({ key: 'menu' })
   expect((await ui.find({ key: 'wrap' }))?.text).toMatch(/Wrap: on/)
   await ui.press({ key: 'wrap' })
   expect((await ui.find({ key: 'wrap' }))?.text).toMatch(/Wrap: off/)
@@ -83,18 +116,16 @@ test('every view of the Files pane draws in a non-git folder with one file', asy
   expect((await ui.find({ key: 'wrap' }))?.text).toMatch(/Wrap: on/)
   expect(await ui.find({ type: 'Code' })).toBeUndefined()
   await ui.press({ key: 'wrap' })
-  await ui.press({ key: 'v-project' })
   for (const t of TABS) {
-    await ui.press({ key: `tab:${t}` })
-    await clean(`project tab ${t}, wrap off`)
+    await openTab(proj, t)
+    await cleanIn(proj, `project tab ${t}, wrap off`)
   }
   expect((await ui.find({ key: 'wrap' }))?.text).toMatch(/Wrap: off/)
   await ui.press({ key: 'wrap' })
-  await ui.press({ key: 'v-files' })
   expect((await ui.find({ key: 'wrap' }))?.text).toMatch(/Wrap: on/)
 
   // a Markdown file as a document: its checkboxes are buttons
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:notes.md' })
   await clean('the Markdown document')
   expect(await ui.find({ type: 'Button', text: /☐ find the iPad build/ })).toBeDefined()
@@ -168,10 +199,11 @@ test('checklists: tick log, undo, counts, only open, edit mode, split; version l
 
   await $.session.start({ cwd: DIR, surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'menu' }) // Wrap, Follow, Compact, version and Tools live in the ⋯ menu
 
   // the version line, and the newer deploy waiting for new chats
   expect(await shows(/Files pane v0\.2\.0 · deployed 2026-11-0[12]/)).toBeDefined()
-  expect(await shows(/A newer pane was deployed 2026-11-0[34]/)).toBeDefined()
+  expect(await shows(/⬆ A newer pane was deployed 2026-11-0[34] .*: open a new chat/)).toBeDefined()
 
   await ui.press({ key: 'e:notes.md' })
   // x of y: the section, and each heading under it
@@ -238,12 +270,12 @@ test('checklists: tick log, undo, counts, only open, edit mode, split; version l
   expect(file).toContain('- [ ] rest a lot\n')
 
   // the Ticks tab: the log across files, by day, with the headings and the file
-  await ui.press({ key: 'v-project' })
-  await ui.press({ key: 'tab:ticks' })
-  expect(await shows(/^Today \(/)).toBeDefined()
-  expect(await shows(/☑ buy paint · Plan › Week 1 › Mon/)).toBeDefined()
-  expect(await shows(/☐ unticked rest a lot · Plan › Week 2/)).toBeDefined()
-  expect(await ui.find({ type: 'Button', text: /notes\.md$/ })).toBeDefined()
+  const proj = await $.ui.mount({ ...PROJECT, surface: 'desktop' })
+  await openTab(proj, 'ticks')
+  expect(await proj.find({ text: /^Today \(/ })).toBeDefined()
+  expect(await proj.find({ text: /☑ buy paint · Plan › Week 1 › Mon/ })).toBeDefined()
+  expect(await proj.find({ text: /☐ unticked rest a lot · Plan › Week 2/ })).toBeDefined()
+  expect(await proj.find({ type: 'Button', text: /notes\.md$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -343,9 +375,11 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
 
   await $.session.start({ cwd: DIR, surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'menu' }) // Wrap, Follow, Compact, version and Tools live in the ⋯ menu
 
   // Open in VS Code: Code.exe with cli.js and the path, as code.cmd would, and no cmd.exe
   await ui.press({ key: 'e:a&calc.txt' })
+  await ui.press({ key: 'file-more' }) // the file's rarer actions are under its ⋯
   await ui.press({ key: 'vscode' })
   await until(() => runs.some(r => r.argv[0]?.endsWith('Code.exe')), 'Code.exe')
   const code = runs.find(r => r.argv[0]?.endsWith('Code.exe'))!
@@ -366,7 +400,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   await ui.press({ key: 'diff' })
 
   // the picture at the last commit: its temp file is removed by the helper, only inside the cache folder
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:pic.png' })
   await ui.press({ key: 'diff' })
   await until(() => runs.some(r => r.argv[3] === 'rmtemp'), 'rmtemp')
@@ -376,7 +410,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   expect(String(rm.argv[5])).toMatch(/^C:\\Users\\tester\\\.claude\\file-pane-cache\\last-commit-\d+\.png$/)
 
   // a 3D model previews through Explorer's thumbnail (Heimdall3D's here), and says what drew it
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:ship.fbx' })
   await until(() => runs.some(r => r.argv[0] === 'powershell.exe' && String(r.argv[4]).includes('FilePaneShellThumb')), 'the shell thumbnail')
   for (let i = 0; i < 20 && !(await ui.find({ text: /preview by heimdall3d_shell\.dll/ })); i++) await ui.drawn()
@@ -384,14 +418,14 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   expect(await ui.find({ text: /couldn't draw|binary file/ })).toBeUndefined()
 
   // a thumbnail maker outside Program Files / Windows is refused, and the pane says so
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:car.glb' })
   for (let i = 0; i < 20 && !(await ui.find({ text: /No preview: .*Program Files/ })); i++) await ui.drawn()
   expect(await ui.find({ text: /No preview: .*Program Files/ })).toBeDefined()
   expect(await ui.find({ text: /No preview: .*Heimdall3D couldn't render it: bad file/ })).toBeDefined()
 
   // a .glb: Heimdall3D's own still (the probe from Program Files, cached), drawn as a picture, and named
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:boat.glb' })
   for (let i = 0; i < 20 && !(await ui.find({ text: /preview by Heimdall3D \(heimdall_probe, GPU\)/ })); i++) await ui.drawn()
   expect(await ui.find({ text: /preview by Heimdall3D \(heimdall_probe, GPU\)/ })).toBeDefined()
@@ -401,7 +435,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   // drawn once: kept on disk for other chats, and a redraw (Back and open again) runs nothing
   await until(() => runs.some(r => r.argv[3] === 'pcache' && r.argv[4] === 'put' && /boat\.glb\|/.test(String(r.argv[6]))), 'keeping the preview')
   const before = runs.length
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:boat.glb' })
   expect(await ui.find({ text: /preview by Heimdall3D/ })).toBeDefined()
   expect(runs.slice(before).filter(r => r.argv[0] === 'powershell.exe' || r.argv[3] === 'probe' || r.argv[3] === 'pcache')).toEqual([])
@@ -415,7 +449,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
 
   // a preview drawn in an earlier chat comes from the disk cache: no PowerShell, a JPEG
   const beforeObj = runs.length
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:ship.obj' })
   for (let i = 0; i < 20 && !(await ui.find({ text: /preview by an earlier chat/ })); i++) await ui.drawn()
   expect(await ui.find({ text: /preview by an earlier chat/ })).toBeDefined()
@@ -430,7 +464,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   }
 
   // a jar: the files inside (from its directory), and ± Diff against the last commit (readable text and hex)
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:mods.jar' })
   await ui.press({ key: 'bin-files' })
   expect(await shows(/^2 entries, .* unpacked/)).toBeDefined()
@@ -440,8 +474,12 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   await ui.press({ key: 'zf:2' })
   expect(await shows(/Fish\.class from mods\.jar: a copy in the cache/)).toBeDefined()
   expect(runs.find(r => r.argv[3] === 'zipget')!.argv.slice(4)).toEqual([`${DIR}\\mods.jar`, 'Fish.class', 'C:\\Users\\tester\\.claude\\file-pane-cache'])
-  await ui.press({ key: 'back' })
-  await ui.press({ key: `rec:${DIR}\\mods.jar` })
+  await ui.press({ key: 'up' })
+  // back to it through 🕘 Recent ▾ (the folder view lists no recent files since 0.4.8)
+  await ui.press({ key: 'recent' })
+  for (let i = 0; i < 20 && !(await ui.find({ type: 'Button', text: /mods\.jar$/ })); i++) await ui.drawn()
+  const jarRow = await ui.find({ type: 'Button', text: /mods\.jar$/ })
+  await ui.press({ key: String(jarRow?.key) })
   await ui.press({ key: 'bin-diff' })
   expect(await shows(/Last commit 235 B → now 297 B/)).toBeDefined()
   // which files inside changed
@@ -467,7 +505,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   await until(() => runs.some(r => r.argv[3] === 'rmtemp' && /\.jar$/.test(String(r.argv[5]))), 'removing the jar temp copy')
 
   // a zip of over 300 files: no buttons until a find narrows it, then each match is one
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:big.zip' })
   await ui.press({ key: 'bin-files' })
   expect(await shows(/^321 entries/)).toBeDefined()
@@ -479,7 +517,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   expect(await shows(/^1 match "wanted"$/)).toBeDefined()
 
   // a class: its bytecode through javap, and the bytecode diff (javap on both copies)
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:Fish.class' })
   await ui.press({ key: 'bin-java' })
   expect(await shows(/public class Fish/)).toBeDefined()
@@ -491,14 +529,14 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   expect(String(javapDiff.argv[6])).toMatch(/last-commit-\d+\.class$/)
 
   // a class whose bytecode is the same: what moved in its debug info (javap -l)
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:Old.class' })
   await ui.press({ key: 'bin-diff' })
   expect(await shows(/^Debug info \(javap -l/)).toBeDefined()
   expect(await shows(/line 4: 0/)).toBeDefined()
 
   // a DLL: what it is (PE info), its readable text, its bytes, and C# through ILSpy (opened as a file)
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:Fish.dll' })
   expect(await shows(/FileVersion = 1\.2\.3\.4/)).toBeDefined()
   expect(await ui.find({ text: /binary file/ })).toBeUndefined()
@@ -544,7 +582,7 @@ test('diffs: Claude\'s change, vs backup / commit, ignore spaces, word highlight
   on('fs.list', (_, e) => ({
     value: String(e.path ?? '') === DIR ? [{ name: 'app.ts', kind: 'file', size: 20, mtimeMs: 1, isLink: false }, { name: 'notes.ts', kind: 'file', size: 20, mtimeMs: 1, isLink: false }] : [],
   }))
-  on('fs.exists', () => ({ value: false }))
+  on('fs.exists', (_, e) => ({ value: /[\\/]\.git$/.test(String(e.path)) })) // a repository, so the Git window draws
   on('fs.stat', (_, e) => ({ value: /\.ts$/i.test(String(e.path)) ? { kind: 'file', size: 20, mtimeMs: 1, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }))
   on('fs.read', (_, e) => {
     if (String(e.path) === FILE) return { value: 'const speed = 2\n' }
@@ -582,10 +620,11 @@ test('diffs: Claude\'s change, vs backup / commit, ignore spaces, word highlight
   expect(runs.filter(r => r[3] === 'backup').map(r => r[4])).toEqual([FILE, FILE])
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  // Changes: ± Claude's change opens the file with its diff against that copy
-  await ui.press({ key: 'v-project' })
-  await ui.press({ key: 'tab:changes' })
-  await ui.press({ key: 'cl:changes:app.ts' })
+  // the Git window → Claude's edits: ± Claude's change opens the file (in the Files window) with its diff against that copy
+  await ui.press({ key: 'menu' }) // the diff options (side by side, ignore spaces) are in ⋯
+  const gitWin = await $.ui.mount({ ...GIT, surface: 'desktop' })
+  await openSection(gitWin, 'claude')
+  await gitWin.press({ key: 'cl:changes:app.ts' })
   expect(await shows(/Compared with the file before Claude's first edit/)).toBeDefined()
   for (let i = 0; i < 20 && !lastDiff().includes('--no-index'); i++) await ui.drawn()
   expect(lastDiff().slice(-3)).toEqual(['--', BEFORE, FILE])
@@ -645,9 +684,9 @@ test('diffs: Claude\'s change, vs backup / commit, ignore spaces, word highlight
   expect((await ui.find({ key: 'claude-putback' }))?.text).toBe('↩ Put back (undo edit 2 and later)')
 
   // vs another file: the one opened before this one
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:notes.ts' })
-  await ui.press({ key: 'back' })
+  await ui.press({ key: 'up' })
   await ui.press({ key: 'e:app.ts' })
   expect((await ui.find({ key: 'base-other' }))?.text).toBe('vs notes.ts')
   await ui.press({ key: 'base-other' })
@@ -722,15 +761,19 @@ test('follow Claude, conflicts, agent tools, /files, tools line, folder and diff
 
   await $.session.start({ cwd: DIR, surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'menu' }) // Wrap, Follow, Compact, version and Tools live in the ⋯ menu
 
   // the tools line: found ones ticked, a missing one says what it's for
-  expect(await shows(/^Tools: ✓ Node · ✗ git · ✗ javap · ✗ ILSpy · ✓ Heimdall3D \(missing: git for diffs/)).toBeDefined()
+  expect(await shows(/^Tools: ✓ Node · ✗ git · ✗ javap · ✗ ILSpy · ✓ Heimdall3D · ✗ Everything \(missing: git for diffs/)).toBeDefined()
 
   // breadcrumbs, sort, find in the folder
   expect((await ui.find({ key: 'bc:0' }))?.text).toBe('F:')
   expect((await ui.find({ key: 'bc:1' }))?.text).toBe('work')
+  // the table's header sorts: Modified, newest first
   await ui.press({ key: 'sort:date' })
-  expect((await ui.find({ key: 'sort:date' }))?.props.variant).toBe('primary')
+  expect((await ui.find({ key: 'sort:date' }))?.text).toBe('Modified ▾')
+  // 🔎 in the bar opens the find box (a small folder doesn't show it by itself)
+  await ui.press({ key: 'find-toggle' })
   await ui.input({ key: 'folder-find', text: 'b.' })
   expect(await shows(/^1 of 4 match "b\."$/)).toBeDefined()
   expect(await ui.find({ key: 'e:a.ts' })).toBeUndefined()
@@ -738,8 +781,7 @@ test('follow Claude, conflicts, agent tools, /files, tools line, folder and diff
   await ui.press({ key: 'find-clear' })
   expect(await ui.find({ key: 'e:a.ts' })).toBeDefined()
 
-  // 👁 Follow Claude: an edit opens the file with that edit's diff
-  await ui.press({ key: 'follow' })
+  // 👁 Follow Claude (on by default): an edit opens the file with that edit's diff
   await $.tool.call({ tool: 'Edit', file_path: A, old_string: 'one', new_string: 'one' })
   expect(await shows(/Compared with the file before Claude's first edit/)).toBeDefined()
   expect(runs.some(r => r[0] === 'git' && r.includes('--no-index') && r.at(-1) === A)).toBe(true)
@@ -767,18 +809,562 @@ test('follow Claude, conflicts, agent tools, /files, tools line, folder and diff
   const notes = await $.tool.call({ tool: 'mcp__file-pane__notes', path: DIR })
   expect(JSON.stringify(notes)).toContain('careful: generated')
 
-  // the files opened lately as tabs
-  expect((await ui.find({ key: 'ft:0' }))?.text).toMatch(/b\.ts$/)
-  expect((await ui.find({ key: 'ft:1' }))?.text).toMatch(/a\.ts$/)
+  // the files opened lately: no row of tabs (0.4.9), they're in 🕘 Recent ▾, newest first
+  expect(await ui.find({ key: 'ft:0' })).toBeUndefined()
+  await ui.press({ key: 'recent' })
+  for (let i = 0; i < 20 && !(await ui.find({ key: 'recent:0' })); i++) await ui.drawn()
+  expect((await ui.find({ key: 'recent:0' }))?.text).toMatch(/b\.ts$/)
+  expect((await ui.find({ key: 'recent:1' }))?.text).toMatch(/a\.ts$/)
+  await ui.press({ key: 'recent' })
 
   // ▤ Compact: shorter labels
+  await ui.press({ key: 'file-more' })
   await ui.press({ key: 'compact' })
-  expect((await ui.find({ key: 'wrap' }))?.text).toBe('↩')
+  expect((await ui.find({ key: 'copy' }))?.text).toBe('📋')
   await ui.press({ key: 'compact' })
 
   // /files ticks opens that Project tab; /files <path> opens a file (typed at the prompt)
   const RUN = { origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 120 } }
-  expect(JSON.stringify(await $.command.run({ command: 'files', args: 'ticks', ...RUN }))).toContain('Project → ticks')
+  expect(JSON.stringify(await $.command.run({ command: 'files', args: 'ticks', ...RUN }))).toContain('Project window opened at ticks')
   expect(JSON.stringify(await $.command.run({ command: 'files', args: 'a.ts', ...RUN }))).toContain(`Opened ${A.replace(/\\/g, '\\\\')}`)
   await ui.unmount()
+})
+
+test('timeline: each version says what it changed', async () => {
+  const v = releasesFrom(
+    [
+      '# Changelog',
+      '## v0.2.5 (2026-11-03)',
+      '- **What’s new:** click the version for every version,',
+      '  newest first.',
+      '  - a sub-point left out',
+      '- **Sidebar:** the `version` shows.',
+      '## v0.2.0 (2026-11-01, release candidate)',
+      '### Replaced mods and collections',
+      '- **Problems → Replaced**: outdated mods.',
+      '### Minecraft packs',
+      '## v0.1.0 — first release (2026-10-13)',
+      '- First',
+      '- Second point with no bold lead. More words.',
+      '- Third', '- Fourth', '- Fifth',
+    ].join('\r\n'),
+  )
+  expect(v.map(x => [x.text, x.date])).toEqual([['v0.2.5', '2026-11-03'], ['v0.2.0', '2026-11-01'], ['v0.1.0 — first release', '2026-10-13']])
+  expect(v[0]!.summary).toBe('What’s new; Sidebar')
+  expect(v[0]!.points).toEqual(['What’s new: click the version for every version, newest first.', 'Sidebar: the version shows.'])
+  // sections name a big version
+  expect(v[1]!.summary).toBe('Replaced mods and collections; Minecraft packs')
+  expect(v[2]!.summary).toBe('First; Second point with no bold lead; Third; Fourth; +1 more')
+})
+
+// A repo with 347 changed files (ModKeeper's) hung the desktop pane on Git, and 180 still did: at most 50 rows are
+// drawn, as a folder tree (folded) or a list in pages, with kinds, sorting, 🔎 find and + / − lines
+test('git: a long list of changed files: folders, pages, kinds, sort, find, line counts', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'files' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__file-pane__open' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: 'F:\\big-repo' }))
+  on('env.get', () => ({ value: 'C:\\Users\\tester' }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.exists', (_, e) => ({ value: /[\\/]\.git$/.test(String(e.path)) }))
+  on('fs.stat', () => ({ value: { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }))
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('store.get', () => ({ value: undefined }))
+  on('clock.sleep', () => ({ value: undefined }))
+  // 150 files in three folders: even ones new, odd ones changed (i lines added, 1 removed), every 25th deleted
+  const DIRS = ['src/ui', 'src/utils', 'docs']
+  const file = (i: number) => `${DIRS[i % 3]}/File${i}.tsx`
+  const code = (i: number) => (i % 25 === 0 ? ' D' : i % 2 ? ' M' : '??')
+  const status = Array.from({ length: 150 }, (_, i) => `${code(i)} ${file(i)}`).join('\n')
+  const numstat = Array.from({ length: 150 }, (_, i) => i)
+    .filter(i => code(i) !== '??')
+    .map(i => `${code(i) === ' D' ? 0 : i}\t${code(i) === ' D' ? 7 : 1}\t${file(i)}`)
+    .join('\n')
+  let counted: string[] = []
+  on('process.run', (_, e) => {
+    const out = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (e.argv[0] === 'git' && e.argv.includes('status')) return out(status)
+    if (e.argv[0] === 'git' && e.argv.includes('--numstat')) return out(numstat)
+    if (e.argv[0] === 'git' && e.argv.includes('rev-parse')) return out('main\n')
+    if (e.argv[0] === 'node' && e.argv[3] === 'lines') {
+      counted = JSON.parse(String(e.init?.stdin ?? '[]')) as string[]
+      return out(JSON.stringify({ ok: true, counts: Object.fromEntries(counted.map(p => [p, 10])) }))
+    }
+    return out('')
+  })
+  await $.session.start({ cwd: 'F:\\big-repo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...GIT, surface: 'desktop' })
+  // the buttons' handlers are async (not awaited by ui.press): wait for the redraw
+  const until = async (ok: () => Promise<boolean>) => {
+    for (let i = 0; i < 50 && !(await ok()); i++) await ui.drawn()
+  }
+  const button = async (re: RegExp) => !!(await ui.find({ type: 'Button', text: re }))
+  const fileButtons = async () => (await ui.findAll({ type: 'Button', text: /File\d+\.tsx$/ })).length
+  await openSection(ui, 'uncommitted')
+  await until(() => button(/📁 docs\/$/))
+
+  // the summary, the new files counted by the helper, folders folded, src/ui and src/utils under src
+  expect(await ui.find({ text: /^On main · 150 files: 72 changed, 72 new, 6 deleted · \+\d[\d,]* −\d+ lines$/ })).toBeDefined()
+  expect(counted.length).toBe(72)
+  expect(await button(/^▸ 📁 docs\/$/)).toBe(true)
+  expect(await button(/^▸ 📁 src\/$/)).toBe(true)
+  expect(await fileButtons()).toBe(0)
+  expect(await ui.find({ text: /^50 files · \+\d[\d,]* −\d+$/ })).toBeDefined()
+  // unfold docs: its 50 files, then the row limit's note
+  await ui.press({ key: 'dir:docs/' })
+  await until(async () => (await fileButtons()) > 0)
+  expect(await button(/^▾ 📁 docs\/$/)).toBe(true)
+  expect(await fileButtons()).toBeLessThanOrEqual(50)
+  expect(await ui.find({ text: /^Showing the first 50 rows/ })).toBeDefined()
+  // columns: Kind, Lines
+  expect(await ui.find({ text: /^● new$/ })).toBeDefined()
+  expect(await ui.find({ text: /^\+10 −0$/ })).toBeDefined()
+  expect(await ui.find({ text: /^● deleted$/ })).toBeDefined()
+  expect(await ui.find({ text: /^\+0 −7$/ })).toBeDefined()
+
+  // ☰ List: pages of 50
+  await ui.press({ key: 'ch-folders' })
+  await until(() => button(/^☰ List$/))
+  expect(await fileButtons()).toBe(50)
+  expect(await ui.find({ text: /^Page 1 of 3 · 1-50 of 150$/ })).toBeDefined()
+  await ui.press({ key: 'ch-next' })
+  await until(async () => !!(await ui.find({ text: /^Page 2 of 3/ })))
+  expect(await ui.find({ text: /^Page 2 of 3 · 51-100 of 150$/ })).toBeDefined()
+
+  // New only, then 🔎 find within them, then most lines first among the changed
+  await ui.press({ key: 'ch-kind:new' })
+  await until(async () => !!(await ui.find({ text: /^72 of 150 match · new only$/ })))
+  expect(await ui.find({ text: /^Page 1 of 2/ })).toBeDefined()
+  await ui.input({ key: 'ch-find', text: 'utils/File1' })
+  await until(async () => !!(await ui.find({ text: /match "utils\/file1"/ })))
+  expect(await button(/^▸ 📜 src\/utils\/File10\.tsx$/) || (await fileButtons()) > 0).toBe(true)
+  expect(await ui.find({ text: /^Page/ })).toBeUndefined()
+  await ui.press({ key: 'ch-find-clear' })
+  await ui.press({ key: 'ch-kind:changed' })
+  // ↕ one sort button: Path → Recently edited → Most lines
+  await ui.press({ key: 'ch-sort' })
+  await until(async () => (await ui.find({ key: 'ch-sort' }))?.text === '↕ Recently edited')
+  await ui.press({ key: 'ch-sort' })
+  await until(async () => (await ui.findAll({ type: 'Button', text: /File\d+\.tsx$/ }))[0]?.text?.endsWith('File149.tsx') ?? false)
+  expect((await ui.findAll({ type: 'Button', text: /File\d+\.tsx$/ }))[0]?.text).toMatch(/File149\.tsx$/)
+
+  // folded and open again: the section keeps working
+  await openSection(ui, 'uncommitted')
+  await until(async () => (await fileButtons()) === 0)
+  expect(await fileButtons()).toBe(0)
+  await openSection(ui, 'uncommitted')
+  await until(async () => (await fileButtons()) > 0)
+  expect(await fileButtons()).toBeGreaterThan(0)
+})
+
+// 📜 Log's 2 s redraw timer ends itself once the Log tab isn't drawn (Files view, pane closed): no timer left running
+test('log: the follow timer stops once the Log tab is left', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'files' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__file-pane__open' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: CWD }))
+  on('env.get', () => ({ value: 'C:\\Users\\tester' }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.exists', () => ({ value: false }))
+  on('fs.stat', () => ({ value: { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }))
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('store.get', () => ({ value: undefined }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('process.run', () => ({ value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }))
+  let now = 1_000_000
+  on('clock.now', () => ({ value: now }))
+  let periods = 0
+  on('clock.every', () => {
+    periods++
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const proj = await $.ui.mount({ ...PROJECT, surface: 'desktop' })
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await ui.drawn()
+  }
+  await openTab(proj, 'log')
+  for (let i = 0; i < 20; i++) await proj.drawn()
+  expect(periods).toBeGreaterThan(0)
+  // still following while the Log tab is drawn
+  const before = periods
+  for (let i = 0; i < 20; i++) await proj.drawn()
+  expect(periods).toBeGreaterThan(before)
+  // the Project window closed, and 20 s later: the next period ends the timer, and no more come
+  await proj.unmount()
+  now += 20_000
+  await settle()
+  const stopped = periods
+  await settle()
+  expect(periods).toBe(stopped)
+})
+
+// Round 1 of the 2026-11-11 UI pass: the top bar (← → ↑, the path as buttons, ⋯), 👁 Follow Claude on by default for
+// reads too (with the lines read shown), never over unsaved typing, off from ⋯ for every chat; pictures ◀ ▶
+test('top bar: back / forward, follow Claude reads, picture steps', async ($, on) => {
+  const DIR = 'F:\\pics'
+  const TXT = 'F:\\pics\\notes.txt'
+  const files = new Map<string, string>([[TXT, 'one\ntwo\nthree\nfour\nfive\n']])
+  const store = new Map<string, unknown>()
+  on('command.register', () => ({ value: { command: 'files' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__file-pane__open' } }))
+  on('tool.call', () => ({ result: 'read', text: 'read' }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: DIR }))
+  on('env.get', () => ({ value: 'C:\\Users\\tester' }))
+  on('fs.list', (_, e) => ({
+    value: String(e.path) === DIR
+      ? [
+          { name: 'a.png', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
+          { name: 'b.png', kind: 'file', size: 100, mtimeMs: 1, isLink: false },
+          { name: 'notes.txt', kind: 'file', size: 24, mtimeMs: 1, isLink: false },
+          { name: 'sub', kind: 'dir', size: 0, mtimeMs: 1, isLink: false },
+        ]
+      : String(e.path).endsWith('sub')
+        ? [{ name: 'inner.txt', kind: 'file', size: 7, mtimeMs: 1, isLink: false }]
+        : [],
+  }))
+  on('fs.exists', () => ({ value: false }))
+  on('fs.stat', (_, e) => ({ value: /\.(txt|png)$/i.test(String(e.path)) ? { kind: 'file', size: /\.txt$/i.test(String(e.path)) ? 24 : 100, mtimeMs: 1, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }))
+  on('fs.read', (_, e) => {
+    if (/\.png$/i.test(String(e.path))) return { value: 'PNG\u0000' } // a picture is binary
+    const v = files.get(String(e.path))
+    if (v === undefined) throw new Error('ENOENT')
+    return { value: v }
+  })
+  on('store.get', (_, e) => ({ value: store.get(String(e.key)) }))
+  on('store.set', (_, e) => {
+    store.set(String(e.key), e.value)
+    return { value: undefined }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: 1_000_000 }))
+  const runs: string[][] = []
+  on('process.run', (_, e) => {
+    runs.push([...e.argv])
+    // the helper's folder sizes: each folder holds 2 KB
+    if (e.argv[3] === 'dirsizes')
+      return { value: { exitCode: 0, stdout: JSON.stringify({ ok: true, sizes: Object.fromEntries(e.argv.slice(4).map(d => [d, { bytes: 2048, files: 1, partial: false }])) }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode: 0, stdout: '{"error":"no pictures in a test"}', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: DIR, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const until = async (ok: () => Promise<boolean>) => {
+    for (let i = 0; i < 30 && !(await ok()); i++) await ui.drawn()
+  }
+  const has = async (key: string) => !!(await ui.find({ key }))
+  const sizes = () => runs.filter(r => r[3] === 'dirsizes').length
+
+  // the folder as a tree: sub's size is counted once (kept), its ▸ opens it in place with its file under it
+  await until(async () => !!(await ui.find({ text: /^2(\.0)? KB$/ })))
+  expect(await ui.find({ text: /^2(\.0)? KB$/ })).toBeDefined()
+  expect(sizes()).toBe(1)
+  await ui.press({ key: 'tg:sub' })
+  await until(() => has('e:sub/inner.txt'))
+  expect(await has('e:sub/inner.txt')).toBe(true)
+  await ui.press({ key: 'tg:sub' })
+  await until(async () => !(await has('e:sub/inner.txt')))
+  expect(await has('e:sub/inner.txt')).toBe(false)
+  expect(sizes()).toBe(1)
+  // ⊞ Open all opens every folder (sub's file shows); one folder still folds on its own and stays folded
+  expect(await has('tree-fold-all')).toBe(false)
+  await ui.press({ key: 'tree-open-all' })
+  await until(() => has('e:sub/inner.txt'))
+  expect(await has('e:sub/inner.txt')).toBe(true)
+  await ui.press({ key: 'tg:sub' })
+  await until(async () => !(await has('e:sub/inner.txt')))
+  for (let i = 0; i < 5; i++) await ui.drawn()
+  expect(await has('e:sub/inner.txt')).toBe(false)
+  // ⊟ Fold all closes the rest
+  await ui.press({ key: 'tg:sub' })
+  await until(() => has('e:sub/inner.txt'))
+  await ui.press({ key: 'tree-fold-all' })
+  await until(async () => !(await has('e:sub/inner.txt')))
+  expect(await has('e:sub/inner.txt')).toBe(false)
+  expect(await has('tree-open-all')).toBe(true)
+
+  // the bar: the path as buttons, the Git and Project windows a press away, ⋯; no ← → yet; Wrap only in ⋯
+  expect(await has('v-git')).toBe(true)
+  expect(await has('v-project')).toBe(true)
+  // Files · Git · Project switch in place in the one pane (no extra dock tabs since 0.4.8)
+  // Project opens on its dashboard: cards, each title opening its page (Items → its page, ← Overview back)
+  await ui.press({ key: 'v-project' })
+  await until(() => has('card-go:next'))
+  expect(await has('card-go:next')).toBe(true)
+  expect(await has('card-go:items')).toBe(true)
+  expect(await has('ov:search')).toBe(true)
+  await ui.press({ key: 'card-go:items' })
+  await until(() => has('tab:overview'))
+  expect(await has('tab:overview')).toBe(true)
+  await ui.press({ key: 'tab:overview' })
+  await until(() => has('card-go:next'))
+  await ui.press({ key: 'v-git' })
+  await until(async () => !!(await ui.find({ text: /isn't in a git repository/ })))
+  expect(await ui.find({ text: /isn't in a git repository/ })).toBeDefined()
+  await ui.press({ key: 'v-files' })
+  await until(() => has('e:notes.txt'))
+  expect(await has('menu')).toBe(true)
+  expect(await has('nav-back')).toBe(false)
+  expect(await has('wrap')).toBe(false)
+  expect((await ui.find({ type: 'Button', key: 'bc:1' }))?.text).toBe('pics')
+
+  // into a folder and to a file: ← goes back, → forward again
+  await ui.press({ key: 'e:sub' })
+  await until(() => has('nav-back'))
+  await ui.press({ key: 'nav-back' })
+  await until(() => has('nav-fwd'))
+  expect(await has('e:notes.txt')).toBe(true)
+  await ui.press({ key: 'nav-fwd' })
+  await until(async () => !(await has('e:notes.txt')))
+  expect((await ui.find({ type: 'Button', key: 'bc:2' }))?.text).toBe('sub')
+  await ui.press({ key: 'up' })
+  await until(() => has('e:notes.txt'))
+
+  // 👁 a Read by Claude: the file opens, with the lines read shown above it
+  await $.tool.call({ tool: 'Read', file_path: TXT, offset: 2, limit: 2 })
+  await until(async () => !!(await ui.find({ text: /^👁 Claude read lines 2–3/ })))
+  expect(await ui.find({ text: /^👁 Claude read lines 2–3/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /Save/ })).toBeDefined()
+  // Claude's own working files aren't followed
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\Users\\tester\\.claude\\projects\\x\\memory\\MEMORY.md' })
+  expect(await ui.find({ text: /^👁 Claude read lines 2–3/ })).toBeDefined()
+  // the ✕ closes the band; ← goes back to the folder
+  await ui.press({ key: 'read-done' })
+  await until(async () => !(await ui.find({ text: /^👁 Claude read/ })))
+  expect(await ui.find({ text: /^👁 Claude read/ })).toBeUndefined()
+
+  // a picture: ◀ ▶ through the folder's pictures, and its own app
+  await ui.press({ key: 'up' })
+  await until(() => has('e:a.png'))
+  await ui.press({ key: 'e:a.png' })
+  await until(() => has('pic-next'))
+  expect(await ui.find({ text: /^1 of 2 in this folder$/ })).toBeDefined()
+  await ui.press({ key: 'pic-next' })
+  await until(async () => !!(await ui.find({ text: /^2 of 2 in this folder$/ })))
+  expect(await ui.find({ text: /^2 of 2 in this folder$/ })).toBeDefined()
+  await ui.press({ key: 'open-app' })
+  await until(async () => runs.some(r => r[0] === 'explorer.exe' && r[1] === 'F:\\pics\\b.png'))
+  expect(runs.some(r => r[0] === 'explorer.exe' && r[1] === 'F:\\pics\\b.png')).toBe(true)
+
+  // ⋯ → Follow off (kept for every chat): a Read no longer opens anything
+  await ui.press({ key: 'menu' })
+  await until(() => has('follow'))
+  expect((await ui.find({ key: 'follow' }))?.text).toBe('👁 Follow Claude: on')
+  await ui.press({ key: 'follow' })
+  await until(async () => store.get('followClaude') === false)
+  expect(store.get('followClaude')).toBe(false)
+  await $.tool.call({ tool: 'Read', file_path: TXT })
+  for (let i = 0; i < 5; i++) await ui.drawn()
+  expect(await has('pic-next')).toBe(true)
+})
+
+// Round 2 of the 2026-11-11 UI pass: git's own words, read by the parsers
+test('git parsers: ages, log, newest commit per file, branches, blame', async () => {
+  const now = Date.UTC(2026, 10, 11, 12)
+  expect(age(now - 30_000, now)).toBe('just now')
+  expect(age(now - 5 * 60_000, now)).toBe('5 min')
+  expect(age(now - 3 * 3_600_000, now)).toBe('3 h')
+  expect(age(now - 2 * 86_400_000, now)).toBe('2 days')
+  expect(age(now - 21 * 86_400_000, now)).toBe('3 weeks')
+  expect(age(now - 400 * 86_400_000, now)).toBe('1 year')
+  expect(ageTone(now - 3_600_000, now)).toBe('new')
+  expect(ageTone(now - 3 * 86_400_000, now)).toBe('recent')
+  expect(ageTone(now - 30 * 86_400_000, now)).toBe('old')
+  const SHA = 'a'.repeat(40)
+  expect(logFrom(`${SHA}\t1762862400\tStrike\tFix: tabs\twith a tab`)).toEqual([{ sha: SHA, at: 1762862400000, author: 'Strike', subject: 'Fix: tabs\twith a tab' }])
+  const last = lastCommitByFile('\u00012000\nsrc/A.ts\nREADME.md\n\n\u00011000\nsrc/a.ts\nold.txt\n')
+  expect(last.get('src/a.ts')).toBe(2_000_000)
+  expect(last.get('old.txt')).toBe(1_000_000)
+  expect(branchesFrom('*\tmain\t1762862400\torigin/main\t[ahead 2, behind 1]\n \tidea\t1762000000\t\t')).toEqual([
+    { name: 'main', at: 1762862400000, upstream: 'origin/main', ahead: 2, behind: 1, current: true },
+    { name: 'idea', at: 1762000000000, upstream: '', ahead: 0, behind: 0, current: false },
+  ])
+  const B = 'b'.repeat(40)
+  const porcelain = [
+    `${SHA} 1 1 2`, 'author Strike', 'author-time 1762862400', 'summary First', 'filename x.ts', '\tone',
+    `${SHA} 2 2`, 'filename x.ts', '\ttwo',
+    `${B} 3 3 1`, 'author Claude', 'author-time 1762000000', 'summary Second', 'filename x.ts', '\tthree',
+  ].join('\n')
+  // the graph's lanes: main straight down, a branch beside it that merges back
+  const M = 'c'.repeat(40)
+  const F = 'f'.repeat(40)
+  const graph = graphRows([
+    `${M}\t${SHA} ${F}\t3\tStrike\tHEAD -> main\tMerge idea`,
+    `${F}\t${SHA}\t2\tStrike\tidea\tTry an idea`,
+    `${SHA}\t\t1\tStrike\ttag: v1\tFirst`,
+  ].join('\n'))
+  expect(graph.map(r => [r.col, r.refs])).toEqual([[0, ['main']], [1, ['idea']], [0, ['🏷 v1']]])
+  expect(graph[0]!.lanes).toEqual([SHA, F])
+  expect(graph[2]!.lanes).toEqual([])
+  expect(blameRuns(porcelain)).toEqual([
+    { from: 1, to: 2, sha: SHA, author: 'Strike', at: 1762862400000, subject: 'First' },
+    { from: 3, to: 3, sha: B, author: 'Claude', at: 1762000000000, subject: 'Second' },
+  ])
+})
+
+// Round 2 in the pane: Git → Changed files with dates, History (a commit's files and diff), Branches (ahead /
+// behind, Compare), and an open file's 🕘 History (commits, who changed each line)
+test('git: dates, history, branches and compare, a file\'s history and blame', async ($, on) => {
+  const ROOT = 'F:\\repo'
+  const FILE = 'F:\\repo\\src\\a.ts'
+  const NOW = Date.now()
+  const s = (ms: number) => String(Math.floor(ms / 1000))
+  const C1 = '1'.repeat(40)
+  const C2 = '2'.repeat(40)
+  on('command.register', () => ({ value: { command: 'files' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__file-pane__open' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: ROOT }))
+  on('env.get', () => ({ value: 'C:\\Users\\tester' }))
+  on('fs.list', (_, e) => ({ value: String(e.path) === 'F:\\repo\\src' ? [{ name: 'a.ts', kind: 'file', size: 12, mtimeMs: NOW - 3_600_000, isLink: false }] : [] }))
+  on('fs.exists', (_, e) => ({ value: /[\\/]\.git$/.test(String(e.path)) }))
+  on('fs.stat', (_, e) => ({ value: /\.ts$/i.test(String(e.path)) ? { kind: 'file', size: 12, mtimeMs: NOW - 3_600_000, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }))
+  on('fs.read', (_, e) => {
+    if (String(e.path) === FILE) return { value: 'one\ntwo\nthree\n' }
+    throw new Error('ENOENT')
+  })
+  on('store.get', () => ({ value: undefined }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: NOW }))
+  on('process.run', (_, e) => {
+    const a = e.argv
+    const out = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (a[0] !== 'git') return out('')
+    if (a.includes('status')) return out(' M src/a.ts')
+    if (a.includes('--numstat') && a.includes('HEAD') && a.includes('diff')) return out('2\t1\tsrc/a.ts')
+    if (a.includes('--name-only')) return out(`\u0001${s(NOW - 5 * 86_400_000)}\nsrc/a.ts\n`)
+    if (a.includes('--abbrev-ref')) return out('main\n')
+    if (a.includes('rev-list')) return out('2\n')
+    if (a.includes('blame')) return out([`${C2} 1 1 2`, 'author Strike', `author-time ${s(NOW - 2 * 86_400_000)}`, 'summary Second', '\tone', `${C2} 2 2`, '\ttwo', `${'0'.repeat(40)} 3 3 1`, 'author Not Committed Yet', `author-time ${s(NOW)}`, 'summary Version of a.ts from a.ts', '\tthree'].join('\n'))
+    if (a.includes('branch') && a.includes('-r')) return out('origin/main\norigin/HEAD\n')
+    if (a.includes('branch')) return out(`*\tmain\t${s(NOW - 86_400_000)}\torigin/main\t[ahead 2]\n \tidea\t${s(NOW - 9 * 86_400_000)}\t\t\n`)
+    if (a.includes('main..idea')) return out(`${C1}\t${s(NOW - 9 * 86_400_000)}\tStrike\tTry an idea\n`)
+    if (a.includes('idea..main')) return out('')
+    if (a.includes('main...idea') && a.includes('--numstat')) return out('5\t0\tsrc/idea.ts\n')
+    if (a.includes('show') && a.includes('--numstat')) return out('2\t1\tsrc/a.ts\n')
+    if (a.includes('show')) return out('@@ -1 +1 @@\n-old\n+new\n')
+    // the graph: every branch, with parents and names
+    if (a.includes('--all')) return out(`${C2}\t${C1}\t${s(NOW - 2 * 86_400_000)}\tStrike\tHEAD -> main, origin/main\tSecond\n${C1}\t\t${s(NOW - 9 * 86_400_000)}\tStrike\t\tFirst\n`)
+    if (a.includes('log')) return out(`${C2}\t${s(NOW - 2 * 86_400_000)}\tStrike\tSecond\n${C1}\t${s(NOW - 9 * 86_400_000)}\tStrike\tFirst\n`)
+    return out('')
+  })
+  await $.session.start({ cwd: ROOT, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const until = async (ok: () => Promise<boolean>) => {
+    for (let i = 0; i < 30 && !(await ok()); i++) await ui.drawn()
+  }
+  const text = (re: RegExp) => ui.find({ text: re })
+  const gitWin = await $.ui.mount({ ...GIT, surface: 'desktop' })
+  const gUntil = async (ok: () => Promise<boolean>) => {
+    for (let i = 0; i < 30 && !(await ok()); i++) await gitWin.drawn()
+  }
+  const gText = (re: RegExp) => gitWin.find({ text: re })
+
+  // the Git window: where main stands, the graph (a picture), the commits as rows; ▸ a commit, ▸ a file's diff
+  await gUntil(async () => !!(await gitWin.find({ type: 'Svg' })))
+  expect(await gText(/^On main · ↑2 vs origin\/main · 2 branches · 1 uncommitted$/)).toBeDefined()
+  expect(await gitWin.find({ type: 'Svg' })).toBeDefined()
+  expect(await gitWin.find({ type: 'Button', text: /^▸ 2222222 Second$/ })).toBeDefined()
+  // columns: Author, When
+  expect(await gText(/^Strike$/)).toBeDefined()
+  expect(await gText(/^2 days ago$/)).toBeDefined()
+  await gitWin.press({ key: `cmb:commit:graph:${C2}` })
+  await gUntil(async () => !!(await gitWin.find({ type: 'Button', text: /src\/a\.ts$/ })))
+  await gitWin.press({ key: `cfd:commit:graph:${C2}:src/a.ts` })
+  await gUntil(async () => !!(await gitWin.find({ type: 'Code' })))
+  expect(await gitWin.find({ type: 'Code' })).toBeDefined()
+
+  // Uncommitted changes (folded until pressed): when each file was edited and last committed
+  await openSection(gitWin, 'uncommitted')
+  // columns: Edited, Committed (under a header)
+  await gUntil(async () => !!(await gText(/^1 h ago$/)))
+  expect(await gText(/^1 h ago$/)).toBeDefined()
+  expect(await gText(/^5 days ago$/)).toBeDefined()
+  expect(await gText(/^Committed$/)).toBeDefined()
+  expect((await gitWin.find({ key: 'ch-sort' }))?.text).toBe('↕ Path')
+
+  // Branches: main ahead of its remote; Compare with idea: its commit and the file that differs
+  await openSection(gitWin, 'branches')
+  await gUntil(async () => !!(await gText(/^● main$/)))
+  expect(await gText(/^↑2 vs origin\/main$/)).toBeDefined()
+  expect(await gText(/^2 local branches, 1 on remotes/)).toBeDefined()
+  await gitWin.press({ key: 'br-cmp:idea' })
+  await gUntil(async () => !!(await gText(/^main ↔ idea$/)))
+  expect(await gText(/^Only on idea: 1 commit$/)).toBeDefined()
+  expect(await gitWin.find({ type: 'Button', text: /Try an idea$/ })).toBeDefined()
+  expect(await gitWin.find({ type: 'Button', text: /src\/idea\.ts$/ })).toBeDefined()
+
+  // an open file's 🕘 History (Files window): its commits, then who changed each line
+  await ui.press({ key: 'e:a.ts' }).catch(() => undefined)
+  await $.tool.call({ tool: 'mcp__file-pane__show', path: FILE })
+  await until(async () => !!(await ui.find({ key: 'fhist' })))
+  await ui.press({ key: 'fhist' })
+  await until(async () => !!(await ui.find({ key: 'fh-blame' })))
+  expect(await ui.find({ type: 'Button', text: /^▸ 2222222 Second$/ })).toBeDefined()
+  await ui.press({ key: 'fh-blame' })
+  await until(async () => !!(await text(/^lines 1–2 · 2222222 · Strike · 2 days ago · Second$/)))
+  expect(await text(/^lines 1–2 · 2222222 · Strike · 2 days ago · Second$/)).toBeDefined()
+  expect(await text(/^line 3 · not committed yet$/)).toBeDefined()
+})
+
+// Folder sizes from Everything's index when voidtools' es.exe is in Program Files\Everything (0.4.10): one es.exe
+// query per folder, by argv, and no helper count for what it answered
+test('folder sizes: es.exe in Program Files answers, the helper counts the rest', async ($, on) => {
+  const DIR = 'F:\\work'
+  const ES = 'C:\\Program Files\\Everything\\es.exe'
+  on('command.register', () => ({ value: { command: 'files' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__file-pane__open' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: DIR }))
+  on('env.get', (_, e) => ({ value: e.name === 'ProgramFiles' ? 'C:\\Program Files' : 'C:\\Users\\tester' }))
+  on('fs.list', (_, e) => ({
+    value: String(e.path) === DIR
+      ? [
+          { name: 'big', kind: 'dir', size: 0, mtimeMs: 1, isLink: false },
+          { name: 'skipped', kind: 'dir', size: 0, mtimeMs: 1, isLink: false },
+        ]
+      : [],
+  }))
+  on('fs.exists', (_, e) => ({ value: String(e.path) === ES }))
+  on('fs.stat', () => ({ value: { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }))
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('store.get', () => ({ value: undefined }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: 1_000_000 }))
+  const runs: string[][] = []
+  on('process.run', (_, e) => {
+    runs.push([...e.argv])
+    const out = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    // Everything knows big (5 MB) but not skipped (left out of its index); the helper counts skipped (1 KB)
+    if (e.argv[0] === ES) return out('Filename,Size\r\n"F:\\work\\big\\",5242880\r\n')
+    if (e.argv[3] === 'dirsizes') return out(JSON.stringify({ ok: true, sizes: Object.fromEntries(e.argv.slice(4).map(d => [d, { bytes: 1024, files: 1, partial: false }])) }))
+    return out('')
+  })
+  await $.session.start({ cwd: DIR, surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  for (let i = 0; i < 40 && !(await ui.find({ text: /^1\.0 KB$/ })); i++) await ui.drawn()
+  expect(await ui.find({ text: /^5\.0 MB$/ })).toBeDefined()
+  expect(await ui.find({ text: /^1\.0 KB$/ })).toBeDefined()
+  const es = runs.filter(r => r[0] === ES)
+  expect(es.length).toBe(1)
+  expect(es[0]).toEqual([ES, '-timeout', '3000', '-parent', DIR, '/ad', '-size', '-csv', '-size-format', '1'])
+  // the helper was asked only for the folder Everything didn't answer
+  expect(runs.filter(r => r[3] === 'dirsizes').map(r => r.slice(4))).toEqual([['F:\\work\\skipped']])
 })

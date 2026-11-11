@@ -192,7 +192,18 @@ export const NEXT_HEADING = /\b(next|open issues|to ?do|todo|roadmap|backlog|pla
 
 // ---------- parsing the project's files (text in, results out; reading is register.tsx's: $ stays in that file) ----------
 
-export type TimelineEntry = { date: string; kind: 'commit' | 'release'; text: string; detail?: string; line?: number; raw?: string }
+export type TimelineEntry = {
+  date: string
+  kind: 'commit' | 'release'
+  text: string
+  detail?: string
+  line?: number
+  raw?: string
+  /** a version's explanation: its ### sections, else the bold leads of its points ("Moonlight lists your games; Sidebar") */
+  summary?: string
+  /** a version's top-level points (sub-points left out), markdown marks removed */
+  points?: string[]
+}
 /** A section of a doc: its title, its text, and its lines (heading at `from`, body to `to`) as written. */
 export type Block = { title: string; body: string; from: number; raw: string[] }
 
@@ -206,13 +217,50 @@ export function commitsFrom(out: string): TimelineEntry[] {
   return list
 }
 
-/** CHANGELOG.md "## v1.2 (2026-10-26, …)" headings. */
+const plain = (s: string) => s.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1')
+
+/** A version's one-line explanation: its ### sections, else each point's bold lead (or its start), the first few. */
+export function versionSummary(points: string[], heads: string[]): string {
+  const parts = heads.length
+    ? heads
+    : points.map(p => (/^\*\*(.+?)\*\*/.exec(p)?.[1] ?? plain(p).split(/[.:;]/)[0]!).replace(/[:.\s]+$/, '').trim()).filter(Boolean)
+  const shown = parts.slice(0, 4)
+  return shown.join('; ') + (parts.length > shown.length ? `; +${parts.length - shown.length} more` : '')
+}
+
+/** CHANGELOG.md "## v1.2 (2026-10-26, …)" headings, each with what it changed (its points and a summary). */
 export function releasesFrom(text: string): TimelineEntry[] {
   const found: TimelineEntry[] = []
+  let cur: { e: TimelineEntry; points: string[]; heads: string[] } | undefined
+  let inPoint = false
+  const close = () => {
+    if (!cur) return
+    cur.e.points = cur.points.map(plain)
+    const summary = versionSummary(cur.points, cur.heads)
+    if (summary) cur.e.summary = summary
+  }
   text.split(/\r?\n/).forEach((l, line) => {
     const m = /^##\s+(.+?)\s*(?:\((\d{4}-\d{2}-\d{2})[^)]*\))?\s*$/.exec(l)
-    if (m) found.push({ date: m[2] ?? '', kind: 'release', text: m[1]!, detail: l.replace(/^##\s+/, ''), line, raw: l })
+    if (m) {
+      close()
+      const e: TimelineEntry = { date: m[2] ?? '', kind: 'release', text: m[1]!, detail: l.replace(/^##\s+/, ''), line, raw: l }
+      found.push(e)
+      cur = { e, points: [], heads: [] }
+      inPoint = false
+      return
+    }
+    if (!cur) return
+    const h = /^###\s+(.+)/.exec(l)
+    if (h) {
+      cur.heads.push(plain(h[1]!.trim()))
+      inPoint = false
+    } else if (/^- \S/.test(l)) {
+      cur.points.push(l.slice(2).trim())
+      inPoint = true
+    } else if (inPoint && /^ {2}(?! *-)\S/.test(l)) cur.points[cur.points.length - 1] += ` ${l.trim()}`
+    else if (!/^\s/.test(l)) inPoint = false
   })
+  close()
   return found
 }
 
@@ -237,4 +285,122 @@ export function blocksFrom(text: string, orTop: boolean): Block[] {
   const bb = s.find(x => /building blocks/i.test(x.title))
   const parts = bb ? s.filter(x => x.level === bb.level + 1 && x.from > bb.from && x.from < bb.to) : orTop ? s.filter(x => x.level === 2) : []
   return parts.map(x => ({ title: x.title, body: lines.slice(x.from + 1, x.to).join('\n').trim(), from: x.from, raw: lines.slice(x.from + 1, x.to) }))
+}
+
+/** How long ago, in a word or two: "just now", "12 min", "3 h", "2 days", "5 weeks", "4 months", "2 years". */
+export function age(ms: number, now: number): string {
+  const s = Math.max(0, (now - ms) / 1000)
+  const n = (x: number, one: string) => `${Math.floor(x)} ${one}${Math.floor(x) === 1 ? '' : 's'}`
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)} min`
+  if (s < 86_400) return `${Math.floor(s / 3600)} h`
+  if (s < 14 * 86_400) return n(s / 86_400, 'day')
+  if (s < 60 * 86_400) return n(s / (7 * 86_400), 'week')
+  if (s < 365 * 86_400) return n(s / (30 * 86_400), 'month')
+  return n(s / (365 * 86_400), 'year')
+}
+
+/** New (a day), recent (a week) or old: the colour a date is drawn in. */
+export function ageTone(ms: number, now: number): 'new' | 'recent' | 'old' {
+  const d = (now - ms) / 86_400_000
+  return d < 1 ? 'new' : d < 7 ? 'recent' : 'old'
+}
+
+export type Commit = { sha: string; at: number; author: string; subject: string }
+
+/** `git log --format=%H%x09%ct%x09%an%x09%s`: one commit a line. */
+export function logFrom(out: string): Commit[] {
+  return out
+    .split(/\r?\n/)
+    .map(l => l.split('\t'))
+    .filter(p => p.length >= 4 && /^[0-9a-f]{7,40}$/.test(p[0]!))
+    .map(p => ({ sha: p[0]!, at: Number(p[1]) * 1000, author: p[2]!, subject: p.slice(3).join('\t') }))
+}
+
+/** `git log --format=%x01%ct --name-only`: each file's newest commit time (keys lower case). */
+export function lastCommitByFile(out: string): Map<string, number> {
+  const seen = new Map<string, number>()
+  let at = 0
+  for (const l of out.split(/\r?\n/)) {
+    if (l.startsWith('\u0001')) at = Number(l.slice(1)) * 1000
+    else if (l.trim() && !seen.has(l.trim().toLowerCase())) seen.set(l.trim().toLowerCase(), at)
+  }
+  return seen
+}
+
+export type Branch = { name: string; at: number; upstream: string; ahead: number; behind: number; current: boolean }
+
+/** `git branch --format=%(HEAD)%09%(refname:short)%09%(committerdate:unix)%09%(upstream:short)%09%(upstream:track)`. */
+export function branchesFrom(out: string): Branch[] {
+  return out
+    .split(/\r?\n/)
+    .map(l => l.split('\t'))
+    .filter(p => p.length >= 3 && p[1])
+    .map(p => ({
+      name: p[1]!,
+      at: Number(p[2]) * 1000,
+      upstream: p[3] ?? '',
+      ahead: Number(/ahead (\d+)/.exec(p[4] ?? '')?.[1] ?? 0),
+      behind: Number(/behind (\d+)/.exec(p[4] ?? '')?.[1] ?? 0),
+      current: p[0] === '*',
+    }))
+}
+
+export type BlameRun = { from: number; to: number; sha: string; author: string; at: number; subject: string }
+
+/** `git blame --porcelain`: the file as runs of lines from one commit each (an uncommitted line: sha of zeros). */
+export function blameRuns(out: string): BlameRun[] {
+  const info = new Map<string, { author: string; at: number; subject: string }>()
+  const runs: BlameRun[] = []
+  let sha = ''
+  let line = 0
+  for (const l of out.split(/\r?\n/)) {
+    const head = /^([0-9a-f]{40}) \d+ (\d+)/.exec(l)
+    if (head) {
+      sha = head[1]!
+      line = Number(head[2])
+      if (!info.has(sha)) info.set(sha, { author: '', at: 0, subject: '' })
+      const last = runs[runs.length - 1]
+      if (last && last.sha === sha && last.to === line - 1) last.to = line
+      else runs.push({ from: line, to: line, sha, author: '', at: 0, subject: '' })
+    } else if (l.startsWith('author ')) info.get(sha)!.author = l.slice(7)
+    else if (l.startsWith('author-time ')) info.get(sha)!.at = Number(l.slice(12)) * 1000
+    else if (l.startsWith('summary ')) info.get(sha)!.subject = l.slice(8)
+  }
+  return runs.map(r => ({ ...r, ...info.get(r.sha)! }))
+}
+
+export type GraphRow = { sha: string; parents: string[]; at: number; author: string; refs: string[]; subject: string; col: number; lanes: (string | null)[] }
+
+/**
+ * `git log --all --date-order --format=%H%x09%P%x09%ct%x09%an%x09%D%x09%s`, laid out in lanes: each commit's column,
+ * and the lanes after it (which commit each lane waits for), so the graph can draw a line from row to row. A lane
+ * keeps its column until it ends (no shuffling), so lines stay straight.
+ */
+export function graphRows(out: string): GraphRow[] {
+  const lanes: (string | null)[] = []
+  const rows: GraphRow[] = []
+  for (const l of out.split(/\r?\n/)) {
+    const p = l.split('\t')
+    if (p.length < 6 || !/^[0-9a-f]{7,40}$/.test(p[0]!)) continue
+    const sha = p[0]!
+    const parents = p[1]!.split(' ').filter(Boolean)
+    let col = lanes.indexOf(sha)
+    if (col < 0) {
+      col = lanes.indexOf(null)
+      if (col < 0) col = lanes.push(null) - 1
+    }
+    for (let i = 0; i < lanes.length; i++) if (i !== col && lanes[i] === sha) lanes[i] = null
+    lanes[col] = parents[0] ?? null
+    for (const q of parents.slice(1))
+      if (!lanes.includes(q)) {
+        let f = lanes.indexOf(null)
+        if (f < 0) f = lanes.push(null) - 1
+        lanes[f] = q
+      }
+    while (lanes.length && lanes[lanes.length - 1] === null) lanes.pop()
+    const refs = p[4]!.split(', ').map(r => r.replace(/^HEAD -> /, '').replace(/^tag: /, '🏷 ')).filter(r => r && r !== 'HEAD' && !/\/HEAD$/.test(r))
+    rows.push({ sha, parents, at: Number(p[2]) * 1000, author: p[3]!, refs, subject: p.slice(5).join('\t'), col, lanes: [...lanes] })
+  }
+  return rows
 }

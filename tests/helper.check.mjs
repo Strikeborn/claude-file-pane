@@ -68,6 +68,28 @@ test('page, backup, splice, restore: a text file read, backed up, changed and pu
   assert.equal(fs.readFileSync(f, 'utf8'), 'one\ntwo\nthree\n');
 });
 
+test('lines counts each new file\'s lines; binary, missing and outside files are -1', () => {
+  const dir = path.join(tmp, 'repo');
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'a.ts'), 'one\ntwo\nthree');
+  fs.writeFileSync(path.join(dir, 'b.bin'), Buffer.from([1, 0, 2]));
+  fs.writeFileSync(path.join(tmp, 'elsewhere.txt'), 'x\n');
+  assert.deepEqual(helper(['lines', dir], JSON.stringify(['src/a.ts', 'b.bin', 'gone.txt', '../elsewhere.txt'])), {
+    ok: true,
+    counts: { 'src/a.ts': 3, 'b.bin': -1, 'gone.txt': -1, '../elsewhere.txt': -1 },
+  });
+});
+
+test('dirsizes adds up each folder (files under it, deeper too), missing folders are zero', () => {
+  const top = path.join(tmp, 'sizes');
+  fs.mkdirSync(path.join(top, 'a', 'deep'), { recursive: true });
+  fs.writeFileSync(path.join(top, 'a', 'one.txt'), 'abc');
+  fs.writeFileSync(path.join(top, 'a', 'deep', 'two.txt'), 'hello');
+  const r = helper(['dirsizes', path.join(top, 'a'), path.join(top, 'gone')]);
+  assert.deepEqual(r.sizes[path.join(top, 'a')], { bytes: 8, files: 2, partial: false });
+  assert.deepEqual(r.sizes[path.join(top, 'gone')], { bytes: 0, files: 0, partial: false });
+});
+
 test('rmtemp removes only the pane\'s own last-commit file in the cache folder', () => {
   fs.mkdirSync(cache, { recursive: true });
   const own = path.join(cache, 'last-commit-123.png'), other = path.join(cache, 'keep.png');

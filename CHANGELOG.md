@@ -2,9 +2,112 @@
 
 Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
-## Unreleased
+## 0.4.11 (deployed 2026-11-11 17:49)
+- ⊞ Open all marks each folder open on its own (any depth, until 400 rows or 300 folders), so ▾ folds any one of them
+  again; in 0.4.10 it was a switch that reopened them (and stopped at an arbitrary three levels).
 
-## 0.4.2 (not deployed yet)
+## 0.4.10 (deployed 2026-11-11 17:40)
+- The folder tree: ⊞ Open all (every folder, three levels deep, a page of rows at a time) and ⊟ Fold all.
+- Folder sizes from Everything's index when voidtools' es.exe is in `C:\Program Files\Everything\` (a few hundred ms a
+  folder); folders it doesn't answer for, and every folder without es.exe, are counted by the helper as before. The
+  Tools line names Everything.
+
+## 0.4.9 (deployed 2026-11-11 17:15; after Strike's look at 0.4.8)
+
+### The folder as a tree
+- A folder's ▸ opens it in place, its rows indented under it (Git's state on nested rows too).
+- Folders show their total size, counted in the background and kept 5 minutes (≥ when cut short); Size sorts by it.
+- Pages of 80 rows instead of a list that grows.
+
+### Less doubled
+- No row of recent-file tabs above an open file: 🕘 Recent ▾ has them.
+- 👁 Follow Claude skips Claude's own working and temp files on edits too (Claude's scratch scripts were opening and
+  filling Recent), and Recent leaves them out.
+- The folder view's git state comes from the kept git answers (it ran git on every redraw).
+
+## 0.4.8 (deployed 2026-11-11 16:56; Strike's picks after 0.4.7)
+
+### One pane again
+- Files · Git · Project are the bar's first row, switched in place: no extra dock tabs to close (0.4.7's windows).
+
+### Cards and columns
+- Every part of a page is a card (title, count on the right; folded = its title row).
+- Lists are tables with a header: the folder (Name | Size | Modified | Git; the header sorts, ↕ is gone), Git's files
+  (File | Kind | Lines | Edited | Committed), commits (Commit | Author | When).
+
+### Project dashboard
+- Project opens on cards: Next, Items (a bar per file), Checks, Commits, Ticks today, More; a card's title opens its
+  page, ← Overview goes back.
+
+### Files
+- 🕘 Recent ▾ in the bar (pinned, then the 8 opened last) instead of the lists above the folder; 🔎 in the bar opens
+  the find box (a folder of more than 20 shows it by itself).
+
+## 0.4.7 (deployed 2026-11-11 16:29; 2026-11-11 UI pass, round 3: Strike's picks after 0.4.6)
+
+### Three windows
+- 📁 Files, 🌿 Git and ☑ Project are their own panes (tabs in the dock), each with at most one row of tabs; the Files |
+  Project switch and Project's groups are gone. Each bar has buttons for the other windows.
+- Project: one row (Next, Items, Ticks, Timeline, Checks, Log, More ›: Search, Backups, Notes, Features, Building
+  blocks).
+
+### Git as one page
+- A graph picture of every branch's newest commits (lanes, merges, branch and tag labels, ages), the commits as rows
+  (▸ files, ▸ a file's diff), then folded: Uncommitted changes, Claude's edits this chat, Branches (with Compare).
+
+### Tidier
+- One toolbar row a view: a file's rarer actions (Explorer, Pin, Copy path, VS Code, Its app, Note) under its own ⋯;
+  diff options in the bar's ⋯; a folder's sort and the Git list's sort are one ↕ button each; kind buttons only when
+  there's more than one kind; the Git list's 🔎 only past 20 files.
+
+### Quicker
+- A tab press is one state change (it was two, so two whole redraws). Git's answers are kept and asked again in the
+  background; file dates fill in in the background.
+
+## 0.4.6 (deployed 2026-11-11 15:42; the 2026-11-11 UI pass, rounds 1 and 2: Strike's picks in NEXT_CHAT.md → Strike's directions)
+
+### A tidier pane
+- One slim top bar: Files | Project, ← → (back and forward through folders and files), ↑, the path as buttons, and ⋯
+  holding Wrap, Follow Claude, Compact, Go to (a path), the version and the Tools line. The version shows outside ⋯
+  only when a newer pane waits; ⋯ shows ⚠ when a tool is missing.
+- Project's 13 tabs in four groups (Work, History, Run, About) with the picked group's tabs under them; Git hides
+  outside a repository, Checks without a package.json.
+- The folder view's own path row and ↑ Up, and each file view's ← Folder, are gone (the top bar has them).
+
+### Follow Claude
+- On by default and one setting for every chat (it was off, and per chat, so it never seemed to follow).
+- Follows reads too: the file opens with a "👁 Claude read lines a–b" band holding those lines. Claude's own working
+  files aren't followed, and neither edits nor reads take the pane from unsaved typing in another file.
+
+### Pictures
+- Drawn up to 800 px (was 420) and shown as wide as the pane allows. ◀ ▶ step through the folder's pictures and
+  models; ⤢ Open in its app.
+
+### Git
+- Changed files: when each was edited and last committed (new ones in green), and Sort: Recently edited.
+- History: the commits, 50 a page; a commit's files and each file's diff.
+- Branches: last commit, ahead / behind the remote, and Compare (commits only on each side, files that differ).
+- 🕘 History on an open file: its commits with this file's diff, or who changed each line (blame).
+
+## 0.4.5 (deployed 2026-11-06 14:16)
+- 📜 Log's 2 s follow timer ends itself once the Log tab hasn't been drawn for 10 s. Before, leaving it for the Files
+  view or closing the pane kept it redrawing every 2 s (each Files redraw runs git status) until another Project tab.
+
+## 0.4.4 (deployed 2026-11-05 12:24)
+- Project → Git / Changes: never more than 50 rows drawn (0.4.3's ⤓ Show more still hung at 180). 📁 Folders: a
+  folded tree, each folder with its file count and + / − lines (a folder holding one folder shows as one, src/ui);
+  ☰ List: pages of 50 (◀ Previous / Next ▶). Kinds (All / Changed / New / Deleted, with counts), Sort (Path or
+  Newest / Most lines / Kind), 🔎 find by part of a path. Each file shows + / − lines against the last commit (git
+  numstat; new files counted by the helper's `lines`), and the header totals them. No Open on a deleted file.
+
+## 0.4.3 (deployed 2026-11-05 11:53)
+- Project → Timeline: each version says what it changed, a summary line from its changelog (its ### sections, else
+  each point's bold lead); ▸ unfolds every point.
+- Project → Git / Changes: a long list of files shows 60 at a time (⤓ Show more). A repo with 347 changed files
+  (ModKeeper's) hung the desktop pane: tabs stopped changing and it kept loading. Git's file names keep their case
+  (they showed in lower case).
+
+## 0.4.2 (deployed 2026-11-03)
 - Faster: the Node helper is a file (`hooks/helper.cjs`), not `node -e` with 30 KB of code; Windows took ~2.7 s to
   start each call that way, a file ~0.1 s. Every save, backup, preview-cache read and binary view gets quicker.
 - 👁 Follow Claude: each file Claude edits opens with that edit's diff. A file open in the pane reloads when Claude

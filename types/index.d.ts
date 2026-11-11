@@ -20,10 +20,24 @@ export type OpenFile = {
  * One tick or untick of a Markdown checkbox, as the pane logs it (`$.store` key `ticks`, newest first, every chat):
  * the file, the item's text, the headings above it, ticked (true) or unticked, when (ms), and the line as it now reads.
  */
+/** A page of the Project view: the dashboard (overview) or one of its full pages. */
+export type ProjectTab = 'overview' | 'next' | 'timeline' | 'items' | 'ticks' | 'features' | 'blocks' | 'changes' | 'git' | 'checks' | 'search' | 'backups' | 'log' | 'notes';
 export type Tick = { path: string; item: string; headings: string[]; done: boolean; at: number; line: number; raw: string };
 
 /** How a binary file shows (for `path`; another file starts at info, byte 0). */
-export type BinView = { path: string; mode: 'info' | 'text' | 'hex' | 'files' | 'java' | 'diff'; at: number };
+/** Project → Git / Changes: 🔎 part of a path, one kind, the order, 📁 folders (with the open ones) or ☰ a list, its page. */
+export type GitList = {
+  find: string;
+  kind: 'all' | 'changed' | 'new' | 'deleted';
+  sort: 'path' | 'lines' | 'kind' | 'newest';
+  folders: boolean;
+  open: string[];
+  page: number;
+  /** Git only: the changed files, the commit history, or the branches (with one compared). */
+  mode?: 'changes' | 'history' | 'branches';
+  compare?: string;
+};
+export type BinView ={ path: string; mode: 'info' | 'text' | 'hex' | 'files' | 'java' | 'diff'; at: number };
 
 /** A file Claude edited this session (from its Edit / Write / NotebookEdit calls). */
 export type Change = {
@@ -53,13 +67,13 @@ declare module 'claude-code' {
       open: OpenFile | null;
       /** The last thing done or refused, shown under the title. */
       message: string;
-      /** How many entries of a long folder are shown. */
+      /** A long folder: the first row of the page shown (pages of 80). */
       shown: number;
       /** The backup the last save made (Revert puts it back). */
       lastBackup: string;
       /** Files, or the Project view of the session's folder. */
-      view: 'files' | 'project';
-      projectTab: 'next' | 'timeline' | 'items' | 'ticks' | 'features' | 'blocks' | 'changes' | 'git' | 'checks' | 'search' | 'backups' | 'log' | 'notes';
+      view: 'files' | 'git' | 'project';
+      projectTab: ProjectTab;
       /** Items: done ones shown too. */
       itemsAll: boolean;
       /** Sections / blocks flipped from their default (open in a short document, folded in a long one). */
@@ -74,6 +88,8 @@ declare module 'claude-code' {
       results: Record<string, CheckResult>;
       /** Changes / Git: the files whose diff is shown. */
       diffOpen: string[];
+      /** Changes / Git: how the file list is narrowed, sorted, grouped and paged. */
+      gitList: GitList;
       /** The band above the prompt hidden (until /files). */
       bandHidden: boolean;
       pinned: string[];
@@ -109,8 +125,16 @@ declare module 'claude-code' {
       sortBy: 'name' | 'size' | 'date';
       /** A folder list narrowed to names holding this text ('': all). */
       folderFind: string;
-      /** 👁 Follow Claude: each file Claude edits opens in the pane with that edit's diff. */
-      followClaude: boolean;
+      /** ← → in the top bar: the places (folders, files) visited before and after this one. */
+      nav: { back: string[]; fwd: string[] };
+      /** The folder tree's open folders (lower-case paths). */
+      treeOpen: string[];
+      /** The top bar's ⋯ menu is open (Wrap, Follow, Compact, Go to, version, Tools). */
+      menu: boolean;
+      /** 👁 Follow Claude: the lines of a file Claude read last (shown above that file), or null. */
+      /** 🕘 History of the open file: its commits, or who changed each line when (blame). */
+      fileHist: { path: string; mode: 'log' | 'blame' } | null;
+      agentRead: { path: string; from: number; to: number; at: number } | null;
       /** Claude edited a file while the pane held unsaved typing for it (`at` when), or null. */
       conflict: { path: string; at: number } | null;
       /** 🗂 Files inside a big zip: the part of a name looked for (`path` the zip it's for). */
