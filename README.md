@@ -208,5 +208,6 @@ Private repository `Strikeborn/claude-file-pane`. In a fresh clone, turn the pre
 `git config core.hooksPath .githooks`. Each deploy (when everything is committed) tags `v<version>` and makes a GitHub
 release with that version's CHANGELOG section.
 
-More: `CLAUDE.md` (engine rules learned the hard way), `SECURITY.md` (what it can do, protections, findings),
-`IDEAS.md` (plans), `NEXT_CHAT.md` (brief for the next agent, local or cloud).
+More: `SECURITY.md` (what it can do, protections, findings). On disk only, not in the repository (agent working
+notes, ignored by git since 2026-11-11): `CLAUDE.md` (engine rules learned the hard way), `IDEAS.md` (plans),
+`NEXT_CHAT.md` (brief for the next agent), `TRY.md` (what to look at in the real pane).

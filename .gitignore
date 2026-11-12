@@ -3,3 +3,9 @@ node_modules/
 
 # Claude Code local settings (approved commands can hold secrets)
 .claude/
+
+# Agent working notes (handoffs, plans, try-lists, agent rules): kept on disk only, never published
+CLAUDE.md
+IDEAS.md
+NEXT_CHAT.md
+TRY.md
