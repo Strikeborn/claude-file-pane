@@ -2,6 +2,12 @@
   "name": "file-pane",
   "version": "0.4.12",
   "description": "A pane beside the chat to browse folders and edit text files (big files page by page, a backup before every save)",
+  "author": {
+    "name": "Strikeborn",
+    "url": "https://github.com/Strikeborn"
+  },
+  "homepage": "https://github.com/Strikeborn/claude-file-pane",
+  "repository": "https://github.com/Strikeborn/claude-file-pane",
   "license": "GPL-3.0-or-later",
   "types": "./types/index.d.ts"
 }

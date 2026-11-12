@@ -842,8 +842,8 @@ export const register: Register = on => {
     // the tools check runs once per chat, in the background (a module variable, not state: drawing can't write state)
     if (!healthStarted) {
       healthStarted = true
-      void checkHealth($).then(h => {
-        health = h
+      void checkHealth($).then(found => {
+        health = found
         $.ui.invalidate('ui.render')
       })
     }
@@ -2419,7 +2419,7 @@ export const register: Register = on => {
           .slice(0, 300)
           .map(m => ({ file: m[1]!, line: Number(m[2]), text: m[3]!.trim().slice(0, 200) }))
       }
-      const files = [...new Set(hits.map(h => h.file))]
+      const files = [...new Set(hits.map(hit => hit.file))]
       return (
         <Box flexDirection="column" gap={1}>
           {Input ? (
@@ -2438,11 +2438,11 @@ export const register: Register = on => {
                 await openPath(join(root, f))
               })()} />
               {hits
-                .filter(h => h.file === f)
-                .map(h => (
-                  <Text key={`sl:${f}:${h.line}`} wrap={wrapMode}>
-                    <Text wrap={wrapMode} color="subtle">{String(h.line).padStart(5)} </Text>
-                    {h.text}
+                .filter(hit => hit.file === f)
+                .map(hit => (
+                  <Text key={`sl:${f}:${hit.line}`} wrap={wrapMode}>
+                    <Text wrap={wrapMode} color="subtle">{String(hit.line).padStart(5)} </Text>
+                    {hit.text}
                   </Text>
                 ))}
             </Box>
@@ -2771,7 +2771,7 @@ export const register: Register = on => {
     const ver = await deployInfo($, home)
     const menuOpen = await read($, menuAtom)
     const nav = await read($, navAtom)
-    const missing = health ? health.filter(h => !h.ok) : []
+    const missing = health ? health.filter(tool => !tool.ok) : []
     const projectRoot = view !== 'files' ? await $.session.cwd() : ''
     const crumbsOf = (p: string) => {
       const out: { label: string; path: string }[] = []
@@ -2857,7 +2857,7 @@ export const register: Register = on => {
             {health ? (
               // which outside programs are there: a missing one says what it's needed for
               <Text key="health" wrap={wrapMode} dimColor={!missing.length} color={missing.length ? 'warning' : undefined}>
-                {`Tools: ${health.map(h => `${h.ok ? '✓' : '✗'} ${h.name}`).join(' · ')}${missing.length ? ` (missing: ${missing.map(h => `${h.name} for ${h.for}`).join('; ')})` : ''}`}
+                {`Tools: ${health.map(tool => `${tool.ok ? '✓' : '✗'} ${tool.name}`).join(' · ')}${missing.length ? ` (missing: ${missing.map(tool => `${tool.name} for ${tool.for}`).join('; ')})` : ''}`}
               </Text>
             ) : null}
           </Box>
@@ -2938,8 +2938,8 @@ export const register: Register = on => {
       const modes = (
         <Box flexDirection="row" gap={1} flexWrap="wrap">
           <Text wrap={wrapMode} bold>🕘 History</Text>
-          <Button key="fh-log" label="Commits" variant={fileHist.mode === 'log' ? 'primary' : 'secondary'} onPress={() => void update($, fileHistAtom, h => (h ? { ...h, mode: 'log' as const } : h))} />
-          <Button key="fh-blame" label="Who changed each line" variant={fileHist.mode === 'blame' ? 'primary' : 'secondary'} onPress={() => void update($, fileHistAtom, h => (h ? { ...h, mode: 'blame' as const } : h))} />
+          <Button key="fh-log" label="Commits" variant={fileHist.mode === 'log' ? 'primary' : 'secondary'} onPress={() => void update($, fileHistAtom, hist => (hist ? { ...hist, mode: 'log' as const } : hist))} />
+          <Button key="fh-blame" label="Who changed each line" variant={fileHist.mode === 'blame' ? 'primary' : 'secondary'} onPress={() => void update($, fileHistAtom, hist => (hist ? { ...hist, mode: 'blame' as const } : hist))} />
           <Button key="fh-close" label="✕" plain onPress={() => void update($, fileHistAtom, () => null)} />
         </Box>
       )
@@ -2997,7 +2997,7 @@ export const register: Register = on => {
       const more = toggled.has('file-more')
       const histOn = fileHist?.path.toLowerCase() === path.toLowerCase()
       return [
-        <Button key="fhist" label={compact ? '🕘' : '🕘 History'} variant={histOn ? 'primary' : 'secondary'} onPress={() => void update($, fileHistAtom, h => (h && h.path.toLowerCase() === path.toLowerCase() ? null : { path, mode: 'log' as const }))} />,
+        <Button key="fhist" label={compact ? '🕘' : '🕘 History'} variant={histOn ? 'primary' : 'secondary'} onPress={() => void update($, fileHistAtom, hist => (hist && hist.path.toLowerCase() === path.toLowerCase() ? null : { path, mode: 'log' as const }))} />,
         <Button key="file-more" label={more ? '✕' : '⋯'} plain onPress={() => void flip('file-more')} />,
         ...(more ? fileMenu(path, isPinned) : []),
       ]

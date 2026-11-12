@@ -34,6 +34,45 @@ in ⋯ says which it found:
 
 Updates: `/plugin marketplace update claude-file-pane`, then reload.
 
+## What it reads, runs and sends
+
+**Sends: nothing leaves the computer.** The pane makes no network requests and has no server, account, key or
+telemetry. What it reads goes to two places only: the pane on your screen, and the model of the chat it runs in when
+Claude calls one of the pane's own tools (`open`, `show`, `backups`, `notes`, `ticks`), which answer with file paths,
+backup times, your per-file notes or your ticked checkboxes.
+
+**Reads**: the folders and files you open in it (and files Claude reads or edits, when 👁 Follow Claude is on); git's
+answers about the repository; its own store (pinned files, notes, ticks, settings); `LOCALAPPDATA` for where Windows
+keeps program folders. It uses no credentials: it never asks for a password or token, and reads none from the machine.
+A file you open is shown as it is, so opening a key file in the pane shows that key on your screen, as an editor would.
+
+**Writes**: only files you save in the pane (a backup copy first, in `~/.claude/file-pane-backups`), a copy of each file
+before Claude's Edit / Write of it (in the same folder, so ↩ Put back can undo Claude's change), and its cache
+(`~/.claude/file-pane-cache`: previews, diffs' temp files). Nothing is deleted except its own temp files.
+
+**Hooks on the conversation**: it watches Claude's Read, Edit and Write calls to open the file Claude touched (👁 Follow
+Claude) and to make the backup copy before an Edit / Write. It always passes the call on unchanged and never answers in
+place of Claude's tools: the only tool calls it answers are its own five tools above, and the only command it answers is
+its own `/files`.
+
+**Programs it starts** (each by name with an argument list, never through a shell's parsing, each with a timeout):
+
+| Program | When | What for |
+|---|---|---|
+| `node` with the pane's own `hooks/helper.cjs` | most actions | paging big files, saves and backups, binary views, zip / jar listings, folder sizes |
+| `git` (read only: status, log, show, diff, branch, blame, grep) | the Git page, Changes, History | nothing commits, switches, fetches or pushes |
+| `powershell.exe -NoProfile -NonInteractive -Command <the pane's fixed script> <path>` | a picture or model preview | Windows imaging and Explorer's thumbnails; the script is fixed text in `hooks/scripts.ts`, the path passed as a quoted literal |
+| `explorer.exe <path>` | Show in Explorer, ⤢ Open in its app | |
+| `cmd.exe /d /c npm run <name>` | Project → Checks, on your press | only script names `test`, `build`, `lint`, `typecheck`, `check`, `tsc`; this runs that project's own code |
+| `where.exe code.cmd`, then VS Code's `Code.exe <cli.js> <path>` | Open in VS Code | |
+| `node --version`, `git --version` | the Tools line, once a chat | |
+| `javap` from a JDK under Program Files | ☕ Bytecode, class diffs | |
+| `ilspycmd` from `~/.dotnet/tools` | C# of a .NET DLL | |
+| `heimdall_probe` from `Program Files\Heimdall3D` | .glb / .gltf previews | |
+| `es.exe` from `Program Files\Everything` | folder sizes | read only: names and sizes |
+
+More in [SECURITY.md](SECURITY.md): each power, its limits, and the findings.
+
 ## What it does
 
 **One pane, three pages** (0.4.8): the bar's first row is **📁 Files · 🌿 Git · ☑ Project**, switched in place (in

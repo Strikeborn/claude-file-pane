@@ -34,8 +34,8 @@ export function tasks(lines: string[]): Task[] {
   lines.forEach((l, i) => {
     if (/^\s*```/.test(l)) fence = !fence
     if (fence) return
-    const h = /^#{1,6}\s+(.*)$/.exec(l)
-    if (h) heading = h[1]!.trim()
+    const head = /^#{1,6}\s+(.*)$/.exec(l)
+    if (head) heading = head[1]!.trim()
     const m = TASK.exec(l)
     if (m) out.push({ line: i, done: m[2] !== ' ', text: (m[3] ?? '').trim(), raw: l, heading })
   })
@@ -59,10 +59,10 @@ export function headingPath(lines: string[], at: number): string[] {
   for (let i = 0; i < at && i < lines.length; i++) {
     const l = lines[i]!
     if (/^\s*```/.test(l)) fence = !fence
-    const h = !fence && /^(#{1,6})\s+(.*)$/.exec(l)
-    if (!h) continue
-    while (stack.length && stack[stack.length - 1]!.level >= h[1]!.length) stack.pop()
-    stack.push({ level: h[1]!.length, title: h[2]!.trim() })
+    const head = !fence && /^(#{1,6})\s+(.*)$/.exec(l)
+    if (!head) continue
+    while (stack.length && stack[stack.length - 1]!.level >= head[1]!.length) stack.pop()
+    stack.push({ level: head[1]!.length, title: head[2]!.trim() })
   }
   return stack.map(s => s.title)
 }
@@ -250,9 +250,9 @@ export function releasesFrom(text: string): TimelineEntry[] {
       return
     }
     if (!cur) return
-    const h = /^###\s+(.+)/.exec(l)
-    if (h) {
-      cur.heads.push(plain(h[1]!.trim()))
+    const head = /^###\s+(.+)/.exec(l)
+    if (head) {
+      cur.heads.push(plain(head[1]!.trim()))
       inPoint = false
     } else if (/^- \S/.test(l)) {
       cur.points.push(l.slice(2).trim())
