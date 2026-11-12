@@ -2,6 +2,10 @@
 
 Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
+## Not released yet
+- No binaries in the repository (for the plugin directory's checks): the helper test makes its sample classes and
+  jars (a JDK's javac, stand-ins without one) and the test model in its temp folder.
+
 ## 0.4.12 (released 2026-11-12: the first public release)
 - The repository is public, under the GPL-3.0-or-later license.
 - Install with one line: `/plugin install file-pane --marketplace Strikeborn/claude-file-pane` (README → Install,

@@ -159,6 +159,6 @@ const head = (len, type) => {
   b.write(type, 4, 'latin1')
   return b
 }
-const out = fileURLToPath(new URL('./star-test.glb', import.meta.url))
+const out = process.argv[2] ?? fileURLToPath(new URL('./star-test.glb', import.meta.url)) // the helper test passes its temp folder
 writeFileSync(out, Buffer.concat([header, head(text.length, 'JSON'), text, head(bin.length, 'BIN\0'), bin]))
 console.log(`wrote ${out} (${12 + 16 + text.length + bin.length} bytes)`)

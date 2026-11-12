@@ -12,8 +12,9 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const sample = (...p) => path.join(root, 'samples', ...p);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'file-pane-check-'));
+// the sample files are made below, in the temp folder (the repository holds no binaries)
+const sample = (...p) => path.join(tmp, 'samples', ...p);
 const cache = path.join(tmp, 'cache');
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
@@ -25,13 +26,16 @@ const helper = (args, input) => {
   return JSON.parse(r.stdout);
 };
 const pf = process.env.ProgramFiles ?? 'C:\\Program Files';
-const hasJavap = ['Eclipse Adoptium', 'Java', 'Microsoft', 'Zulu', 'BellSoft'].some(v => {
+// a JDK's bin folder (javac to make the sample classes, javap for the helper), or undefined; FILE_PANE_NO_JDK=1 tries
+// the run without one (Windows sets ProgramFiles itself, so it can't be pointed elsewhere)
+const jdkBin = process.env.FILE_PANE_NO_JDK === '1' ? undefined : ['Eclipse Adoptium', 'Java', 'Microsoft', 'Zulu', 'BellSoft'].flatMap(v => {
   try {
-    return fs.readdirSync(path.join(pf, v)).some(d => fs.existsSync(path.join(pf, v, d, 'bin', 'javap.exe')));
+    return fs.readdirSync(path.join(pf, v)).map(d => path.join(pf, v, d, 'bin'));
   } catch {
-    return false;
+    return [];
   }
-});
+}).find(b => fs.existsSync(path.join(b, 'javap.exe')) && fs.existsSync(path.join(b, 'javac.exe')));
+const hasJavap = !!jdkBin;
 
 // a stored (unpacked) zip with the given entries, written by hand: for names a jar tool won't make
 const makeZip = (file, entries) => {
@@ -54,6 +58,33 @@ const makeZip = (file, entries) => {
   end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16);
   fs.writeFileSync(file, Buffer.concat([...locals, cd, end]));
 };
+
+// The samples: Fish-1.class (haul() returns 1), Fish-lines.class (the same code, haul() moved to line 4), and two jars,
+// fish-1 holding Fish-1 and fish-2 holding a Fish whose haul() returns 2 plus notes.txt. Without a JDK the classes are
+// stand-ins (a class file's magic number, no code), and the javap checks are skipped. Plus the test model, star-test.glb.
+{
+  const java = path.join(tmp, 'samples', 'java');
+  fs.mkdirSync(java, { recursive: true });
+  const compile = (name, source) => {
+    const dir = path.join(tmp, 'javac', name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Fish.java'), source);
+    const r = spawnSync(path.join(jdkBin, 'javac.exe'), ['-g:source,lines', '--release', '21', 'Fish.java'], { cwd: dir, encoding: 'utf8', timeout: 120_000 });
+    assert.equal(r.status, 0, `javac ${name}: ${r.stderr}`);
+    return fs.readFileSync(path.join(dir, 'Fish.class'));
+  };
+  const standIn = n => Buffer.concat([Buffer.from([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 65]), Buffer.alloc(n)]);
+  const one = jdkBin ? compile('one', 'public class Fish { int haul() { return 1; } }\n') : standIn(40);
+  const lines = jdkBin ? compile('lines', 'public class Fish {\n\n\n  int haul() { return 1; }\n}\n') : standIn(41);
+  const two = jdkBin ? compile('two', 'public class Fish { int haul() { return 2; } }\n') : standIn(50);
+  fs.writeFileSync(path.join(java, 'Fish-1.class'), one);
+  fs.writeFileSync(path.join(java, 'Fish-lines.class'), lines);
+  const manifest = 'Manifest-Version: 1.0\r\nCreated-By: the helper test\r\n\r\n';
+  makeZip(path.join(java, 'fish-1.jar'), [['META-INF/', ''], ['META-INF/MANIFEST.MF', manifest], ['Fish.class', one]]);
+  makeZip(path.join(java, 'fish-2.jar'), [['META-INF/', ''], ['META-INF/MANIFEST.MF', manifest], ['Fish.class', two], ['notes.txt', 'hello\n']]);
+  const glb = spawnSync(process.execPath, [path.join(root, 'samples', 'make-test-glb.mjs'), sample('star-test.glb')], { encoding: 'utf8', timeout: 60_000, env: (({ NODE_TEST_CONTEXT, ...rest }) => rest)(process.env) });
+  assert.equal(glb.status, 0, `make-test-glb: ${glb.stderr}`);
+}
 
 test('page, backup, splice, restore: a text file read, backed up, changed and put back', () => {
   const f = path.join(tmp, 'notes.txt');
@@ -142,7 +173,9 @@ test('ziplist, zipget: the files in a jar, one copied out (CRC checked), names k
 test('bindiff, zipentry: two jars compared, file by file and one file inside', () => {
   const d = helper(['bindiff', sample('java', 'fish-1.jar'), sample('java', 'fish-2.jar'), cache]);
   assert.equal(d.same, false);
-  assert.deepEqual(d.files, ['~ Fish.class  (235 → 297 bytes)', '+ notes.txt  (6 bytes)']);
+  assert.equal(d.files.length, 2);
+  assert.match(d.files[0], /^~ Fish\.class {2}\(\d+ → \d+ bytes\)$/);
+  assert.equal(d.files[1], '+ notes.txt  (6 bytes)');
   assert.match(d.hex[0], /^@@ /);
   assert.deepEqual(helper(['zipentry', sample('java', 'fish-1.jar'), sample('java', 'fish-2.jar'), 'META-INF/MANIFEST.MF', cache, pf]), { same: true });
   assert.match(helper(['zipentry', sample('java', 'fish-1.jar'), sample('java', 'fish-2.jar'), 'notes.txt', cache, pf]).diff, /^\+hello$/m);
@@ -150,7 +183,7 @@ test('bindiff, zipentry: two jars compared, file by file and one file inside', (
   if (hasJavap) {
     assert.equal(cls.kind, 'javap');
     assert.match(cls.diff, /^\+ +0: iconst_2$/m);
-  } else assert.equal(cls.kind, 'binary');
+  } else assert.ok(['binary', 'javap'].includes(cls.kind), cls.kind); // stand-in classes (javap may still be there)
   // javap's and the diff's own temp files are gone
   assert.deepEqual(fs.existsSync(path.join(cache, 'diff')) ? fs.readdirSync(path.join(cache, 'diff')) : [], []);
 });
