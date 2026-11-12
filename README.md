@@ -210,4 +210,5 @@ release with that version's CHANGELOG section.
 
 More: `SECURITY.md` (what it can do, protections, findings). On disk only, not in the repository (agent working
 notes, ignored by git since 2026-11-11): `CLAUDE.md` (engine rules learned the hard way), `IDEAS.md` (plans),
-`NEXT_CHAT.md` (brief for the next agent), `TRY.md` (what to look at in the real pane).
+`NEXT_CHAT.md` (brief for the next agent), `TRY.md` (what to look at in the real pane), `SECURITY.local.md` (this
+machine's security notes: other apps, the repository's history).
