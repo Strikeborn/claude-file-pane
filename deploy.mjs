@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 const src = path.dirname(fileURLToPath(import.meta.url));
 const dest = path.join(os.homedir(), '.claude', 'mods', 'file-pane');
 // what the mod is made of (the engine writes .claude-plugin/types itself, in each folder it loads)
-const FILES = ['.claude-plugin/plugin.json', 'tsconfig.json', 'README.md', 'CLAUDE.md'];
+const FILES = ['.claude-plugin/plugin.json', 'tsconfig.json', 'README.md', 'LICENSE', 'CLAUDE.md'];
 const DIRS = ['hooks', 'types', 'tests'];
 
 const run = (label, cmd, args) => {

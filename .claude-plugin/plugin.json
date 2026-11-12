@@ -2,5 +2,6 @@
   "name": "file-pane",
   "version": "0.4.11",
   "description": "A pane beside the chat to browse folders and edit text files (big files page by page, a backup before every save)",
+  "license": "GPL-3.0-or-later",
   "types": "./types/index.d.ts"
 }

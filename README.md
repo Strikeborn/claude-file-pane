@@ -3,12 +3,36 @@
 A pane beside the Claude Code chat for browsing folders, reading and editing files, and keeping an eye on the project
 the chat is working in. It's a Claude Code mod (hooks module), not an MCP server or an app.
 
-Plugin name: `file-pane` · version 0.4.2 · open it with `/files`, `/files <project tab>` (`/files ticks`, `changes`,
+Plugin name: `file-pane` · version 0.4.11 · open it with `/files`, `/files <project tab>` (`/files ticks`, `changes`,
 `git`…) or `/files <path>`.
 
 Claude's tools: `mcp__file-pane__open` (the pane at a folder or file), `show` (a file with its diff or one line
 pointed at), `backups` (a file's backup copies), `notes` (your per-file notes), `ticks` (the checkboxes ticked
 through the pane).
+
+## Install
+
+At the prompt of a Claude Code session:
+
+```
+/plugin install file-pane --marketplace Strikeborn/claude-file-pane
+```
+
+Answer `y` to add the marketplace, then pick a scope (just you, or this project). Open the pane with `/files`.
+
+**Needs**: Windows (built and tested there; pictures, Explorer and thumbnails go through Windows), Node.js (the helper
+that pages, saves and backs up) and git (the Git page, Changes, History). These add more, each optional; the Tools line
+in ⋯ says which it found:
+
+| Tool | Adds |
+|---|---|
+| [Everything](https://www.voidtools.com/) with `es.exe` in `C:\Program Files\Everything\` | folder sizes at once, from its index (otherwise counted in the background) |
+| A JDK under `C:\Program Files` (Adoptium, Oracle, Microsoft, Zulu, BellSoft) | ☕ Bytecode and class diffs (`javap`) |
+| `ilspycmd` (`dotnet tool install -g ilspycmd`) | C# for a .NET DLL, and its C# diff |
+| Heimdall3D (`heimdall_probe` under Program Files) | .glb / .gltf previews with materials |
+| VS Code | Open in VS Code |
+
+Updates: `/plugin marketplace update claude-file-pane`, then reload.
 
 ## What it does
 
@@ -212,3 +236,9 @@ More: `SECURITY.md` (what it can do, protections, findings). On disk only, not i
 notes, ignored by git since 2026-11-11): `CLAUDE.md` (engine rules learned the hard way), `IDEAS.md` (plans),
 `NEXT_CHAT.md` (brief for the next agent), `TRY.md` (what to look at in the real pane), `SECURITY.local.md` (this
 machine's security notes: other apps, the repository's history).
+
+## License
+
+The Files pane is free software under the [GNU General Public License v3.0](LICENSE) (or any later version). You can
+use, study, change and share it. If you distribute a modified version, it has to stay under the GPL with its source
+code available.

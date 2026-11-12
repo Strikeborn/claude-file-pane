@@ -8,6 +8,15 @@ This machine's own notes (cross-project security notes, other apps, the reposito
 `SECURITY.local.md`, kept on disk only (ignored by git). Anything about the mod itself goes here; anything about one
 machine, its other apps or its people goes there.
 
+## Reporting a vulnerability
+
+Please report it privately through the repository's **Security** tab → **Report a vulnerability** (GitHub's private
+vulnerability reporting), not as a public issue. Say what a file, folder name, model or repository has to hold, what
+the pane does with it, and on which version (⋯ in the pane shows it). Expect a first answer within a week; a fix goes
+in a new version, with a line in the Findings below once it's out.
+
+<!-- Turn on before the repository goes public: Settings → Code security → Private vulnerability reporting → Enable. -->
+
 ## What it can do
 
 | Power | Where | Why |
