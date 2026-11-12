@@ -3,7 +3,7 @@
 A pane beside the Claude Code chat for browsing folders, reading and editing files, and keeping an eye on the project
 the chat is working in. It's a Claude Code mod (hooks module), not an MCP server or an app.
 
-Plugin name: `file-pane` · version 0.4.11 · open it with `/files`, `/files <project tab>` (`/files ticks`, `changes`,
+Plugin name: `file-pane` · version 0.4.12 · open it with `/files`, `/files <project tab>` (`/files ticks`, `changes`,
 `git`…) or `/files <path>`.
 
 Claude's tools: `mcp__file-pane__open` (the pane at a folder or file), `show` (a file with its diff or one line
@@ -228,7 +228,7 @@ The pane test answers every program call itself; the helper test is where the he
 
 ## GitHub
 
-Private repository `Strikeborn/claude-file-pane`. In a fresh clone, turn the pre-push check on once:
+Public repository `Strikeborn/claude-file-pane` (private until 2026-11-12). In a fresh clone, turn the pre-push check on once:
 `git config core.hooksPath .githooks`. Each deploy (when everything is committed) tags `v<version>` and makes a GitHub
 release with that version's CHANGELOG section.
 

@@ -2,6 +2,13 @@
 
 Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 
+## 0.4.12 (released 2026-11-12: the first public release)
+- The repository is public, under the GPL-3.0-or-later license.
+- Install with one line: `/plugin install file-pane --marketplace Strikeborn/claude-file-pane` (README → Install,
+  with what it needs and which tools add more).
+- SECURITY.md says how to report a vulnerability privately.
+- No change to the pane itself since 0.4.11.
+
 ## 0.4.11 (deployed 2026-11-11 17:49)
 - ⊞ Open all marks each folder open on its own (any depth, until 400 rows or 300 folders), so ▾ folds any one of them
   again; in 0.4.10 it was a switch that reopened them (and stopped at an arbitrary three levels).

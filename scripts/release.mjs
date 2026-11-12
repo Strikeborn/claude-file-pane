@@ -1,4 +1,4 @@
-// A git tag and a GitHub release (on the private repository) for the version in plugin.json, its notes from that
+// A git tag and a GitHub release for the version in plugin.json, its notes from that
 // version's CHANGELOG.md section. deploy.mjs runs it after a deploy; by hand: `node scripts/release.mjs`.
 // Only when everything is committed (the tag must be what was deployed), and only once per version.
 import { execFileSync } from 'node:child_process';
