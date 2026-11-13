@@ -291,7 +291,7 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   on('ui.status', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: DIR }))
-  on('env.get', () => ({ value: 'C:\\Users\\tester' }))
+  on('env.get', (_, e) => ({ value: e.name === 'LOCALAPPDATA' ? 'C:\\Users\\tester\\AppData\\Local' : 'C:\\Users\\tester' }))
   on('fs.list', (_, e) => ({
     value: String(e.path ?? '') === DIR ? [
             { name: 'a&calc.txt', kind: 'file', size: 4, mtimeMs: 1, isLink: false },
@@ -329,7 +329,6 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
     const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     // node -e <helper> <command> …
     const [exe, , , cmd] = e.argv
-    if (exe === 'where.exe') return out(`${VS}\\bin\\code.cmd\r\n`)
     if (exe === 'git' && e.argv.includes('diff')) return out('diff --git a/a&calc.txt b/a&calc.txt\n--- a/a&calc.txt\n+++ b/a&calc.txt\n@@ -1 +1 @@\n-hello there\n+hi\n')
     if (exe === 'node') {
       // the helper's binary commands, answered as it answers them
@@ -385,6 +384,8 @@ test('VS Code and the temp file go without cmd.exe; 3D models preview', async ($
   const code = runs.find(r => r.argv[0]?.endsWith('Code.exe'))!
   expect(code.argv).toEqual([`${VS}\\Code.exe`, `${VS}\\abc123\\resources\\app\\out\\cli.js`, `${DIR}\\a&calc.txt`])
   expect(code.env?.ELECTRON_RUN_AS_NODE).toBe('1')
+  // found in VS Code's own install folder, not through PATH
+  expect(runs.some(r => r.argv[0] === 'where.exe')).toBe(false)
 
   // a side-by-side diff draws wrapped (row by row, each before beside its after) and cut (two columns)
   await ui.press({ key: 'diff' })
@@ -1367,4 +1368,43 @@ test('folder sizes: es.exe in Program Files answers, the helper counts the rest'
   expect(es[0]).toEqual([ES, '-timeout', '3000', '-parent', DIR, '/ad', '-size', '-csv', '-size-format', '1'])
   // the helper was asked only for the folder Everything didn't answer
   expect(runs.filter(r => r[3] === 'dirsizes').map(r => r.slice(4))).toEqual([['F:\\work\\skipped']])
+})
+
+// Project → Checks on Windows: npm's own script run with node (npm is a .cmd shim, and cmd.exe would read the name)
+test('checks: npm run through node, never cmd.exe', async ($, on) => {
+  const NPM = 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js'
+  const runs: string[][] = []
+  on('command.register', () => ({ value: { command: 'files' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__file-pane__open' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: CWD }))
+  on('env.get', () => ({ value: 'C:\Users\tester' }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.exists', (_, e) => ({ value: /package\.json$/i.test(String(e.path)) }))
+  on('fs.stat', () => ({ value: { kind: 'dir', size: 0, mtimeMs: 1, isLink: false } }))
+  on('fs.read', (_, e) => {
+    if (/package\.json$/i.test(String(e.path))) return { value: JSON.stringify({ scripts: { test: 'node --test', deploy: 'node deploy.mjs' } }) }
+    throw new Error('ENOENT')
+  })
+  on('store.get', () => ({ value: undefined }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    runs.push([...e.argv])
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (e.argv[0] === 'node' && e.argv[3] === 'npmcli') return out(JSON.stringify({ file: NPM }))
+    if (e.argv[0] === 'node' && e.argv[2] === NPM) return out('ℹ tests 3\nℹ pass 3\n')
+    return out('', 128)
+  })
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+  const proj = await $.ui.mount({ ...PROJECT, surface: 'desktop' })
+  expect(await openTab(proj, 'checks')).toBe(true)
+  // only the wanted script names get a button
+  expect(await proj.find({ key: 'run:test' })).toBeDefined()
+  expect(await proj.find({ key: 'run:deploy' })).toBeUndefined()
+  await proj.press({ key: 'run:test' })
+  for (let i = 0; i < 50 && !runs.some(r => r[2] === NPM); i++) await proj.drawn()
+  expect(runs.find(r => r[2] === NPM)).toEqual(['node', '--', NPM, 'run', 'test'])
+  expect(runs.some(r => /cmd\.exe$/i.test(r[0] ?? '') || r[0] === 'npm')).toBe(false)
 })

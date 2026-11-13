@@ -8,6 +8,8 @@ Newest first. Version is `.claude-plugin/plugin.json`'s; deploy times are local.
 - For the plugin directory: no variable named `h` (the name JSX compiles to) in the modules; `author`, `homepage`,
   `repository` in plugin.json; the README says what the pane reads, runs and sends, and which calls it hooks.
 - An icon: a folder with a page and a pencil writing on it (drawn from `art/icon.svg`).
+- No cmd.exe and no PATH search: Project → Checks runs npm's own script with node, and Open in VS Code looks only in
+  VS Code's install folders (SECURITY findings 12 and 4 fixed).
 
 ## 0.4.12 (released 2026-11-12: the first public release)
 - The repository is public, under the GPL-3.0-or-later license.

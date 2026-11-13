@@ -188,14 +188,13 @@ function helperFile($: EngineInterface): string {
 
 /**
  * VS Code without cmd.exe: `code` is a .cmd shim, and cmd would read `&`, `|`, `^`, `%` in a file name as its own
- * syntax. The shim only runs `Code.exe <cli.js> %*` with ELECTRON_RUN_AS_NODE=1, so find it (PATH via where.exe, or
- * the usual install folders), read those two paths out of it, and run them by argv.
+ * syntax. The shim only runs `Code.exe <cli.js> %*` with ELECTRON_RUN_AS_NODE=1, so find it in VS Code's own install
+ * folders (not PATH, so nothing earlier on PATH can pick what runs), read those two paths out of it, and run them by
+ * argv.
  */
 async function findVscode($: EngineInterface): Promise<{ exe: string; cli: string } | null> {
   if (vscode) return vscode
   const shims: string[] = []
-  const r = await $.process.run(['where.exe', 'code.cmd'], { timeoutMs: 10_000 }).catch(() => null)
-  if (r?.exitCode === 0) shims.push(...r.stdout.split(/\r?\n/).map(l => l.trim()))
   const local = await $.env.get('LOCALAPPDATA')
   const programs = await $.env.get('ProgramFiles')
   if (local) shims.push(`${local}\\Programs\\Microsoft VS Code\\bin\\code.cmd`)
@@ -2094,7 +2093,13 @@ export const register: Register = on => {
         await update($, runningAtom, () => name)
         const t0 = Date.now()
         try {
-          const argv = win ? ['cmd.exe', '/d', '/s', '/c', `npm run ${name}`] : ['npm', 'run', name]
+          // Windows: npm is a .cmd shim, so run npm's own script with node instead (no cmd.exe reading the name)
+          let argv = ['npm', 'run', name]
+          if (win) {
+            const cli = await helper(['npmcli'])
+            if (typeof cli.file !== 'string') throw new Error(String(cli.error ?? 'npm not found'))
+            argv = ['node', '--', cli.file, 'run', name]
+          }
           const r = await $.process.run(argv, { cwd: root, timeoutMs: 600_000 })
           const all = `${r.stdout}\n${r.stderr}`.replace(ANSI, '')
           const lines = all.split(/\r?\n/).filter(l => l.trim())

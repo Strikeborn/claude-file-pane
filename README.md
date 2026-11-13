@@ -65,8 +65,8 @@ its own `/files`.
 | `git` (read only: status, log, show, diff, branch, blame, grep) | the Git page, Changes, History | nothing commits, switches, fetches or pushes |
 | `powershell.exe -NoProfile -NonInteractive -Command <the pane's fixed script> <path>` | a picture or model preview | Windows imaging and Explorer's thumbnails; the script is fixed text in `hooks/scripts.ts`, the path passed as a quoted literal |
 | `explorer.exe <path>` | Show in Explorer, ⤢ Open in its app | |
-| `cmd.exe /d /c npm run <name>` | Project → Checks, on your press | only script names `test`, `build`, `lint`, `typecheck`, `check`, `tsc`; this runs that project's own code |
-| `where.exe code.cmd`, then VS Code's `Code.exe <cli.js> <path>` | Open in VS Code | |
+| `node -- <Node's folder>\node_modules\npm\bin\npm-cli.js run <name>` (npm itself, without its `.cmd` shim) | Project → Checks, on your press | only script names `test`, `build`, `lint`, `typecheck`, `check`, `tsc`; this runs that project's own code |
+| VS Code's `Code.exe <cli.js> <path>`, found in its own install folders (not PATH) | Open in VS Code | |
 | `node --version`, `git --version` | the Tools line, once a chat | |
 | `javap` from a JDK under Program Files | ☕ Bytecode, class diffs | |
 | `ilspycmd` from `~/.dotnet/tools` | C# of a .NET DLL | |

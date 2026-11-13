@@ -307,6 +307,10 @@ try {
     let used = buf, end = start + buf.length;
     if (end < size) { const nl = buf.lastIndexOf(10); if (nl >= 0) { used = buf.subarray(0, nl + 1); end = start + nl + 1; } }
     out({ start, end, size, binary: used.subarray(0, 8000).includes(0), text: used.toString('utf8') });
+  } else if (cmd === 'npmcli') {
+    // npm's own script beside this Node (Project → Checks runs it with node: no cmd.exe for the npm.cmd shim)
+    const file = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    out(fs.existsSync(file) ? { file } : { error: 'npm not found beside Node (' + path.dirname(process.execPath) + ')' });
   } else if (cmd === 'backup') {
     fs.mkdirSync(a[1], { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');

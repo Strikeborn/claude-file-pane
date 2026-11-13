@@ -214,3 +214,12 @@ test('ilspy, csdiff: a .NET DLL to C#, and two copies compared', { skip: process
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.deepEqual(helper(['csdiff', dll, dll, cache]), { diff: '' });
 });
+
+test('npmcli: npm\'s own script beside this Node, for Checks without cmd.exe', () => {
+  const r = helper(['npmcli']);
+  if (typeof r.file === 'string') {
+    assert.match(r.file, /[\\/]node_modules[\\/]npm[\\/]bin[\\/]npm-cli\.js$/);
+    assert.equal(fs.existsSync(r.file), true);
+    assert.ok(r.file.startsWith(path.dirname(process.execPath)));
+  } else assert.match(String(r.error), /^npm not found beside Node/);
+});
