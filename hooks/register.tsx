@@ -113,7 +113,8 @@ const csDiffs = new Map<string, Record<string, unknown>>()
 const entryDiffs = new Map<string, Record<string, unknown>>()
 // a picture or model preview as the pane draws it (a small PNG / JPEG, base64), by kind|path|size|modified, and the
 // ones being drawn now (in the background: a model's render can take seconds)
-type Thumb = { w: number; h: number; tw: number; th: number; b64: string; mime?: string; via?: string }
+// the picture's height comes as the JSON key "h", read by its string name (the plugin directory refuses a name h)
+type Thumb = { w: number; tw: number; th: number; b64: string; mime?: string; via?: string }
 const previews = new Map<string, Thumb | string>()
 const drawing = new Set<string>()
 // VS Code's own launcher (Code.exe + its cli.js), found once
@@ -3141,8 +3142,8 @@ export const register: Register = on => {
       const draw = (k: string, v: unknown, alt: string) =>
         typeof v === 'string' ? (Svg ? <Svg key={k} alt={alt} source={v} isInteractive /> : <Text wrap={wrapMode} dimColor>{alt}</Text>) : v ? picture(k, v as Thumb, alt, zoom) : null
       // a model's thumbnail size says nothing about it: name what drew it instead
-      const pic = now && typeof now !== 'string' ? (now as { w: number; h: number; via?: string }) : null
-      const dims = !pic ? '' : shell ? (pic.via ? ` · preview by ${pic.via}` : '') : ` · ${pic.w}×${pic.h}`
+      const pic = now && typeof now !== 'string' ? (now as { w: number; via?: string } & Record<string, unknown>) : null
+      const dims = !pic ? '' : shell ? (pic.via ? ` · preview by ${pic.via}` : '') : ` · ${pic.w}×${String(pic['h'])}`
       return (
         <Box flexDirection="column" gap={1}>
           {header}
