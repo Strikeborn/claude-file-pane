@@ -228,6 +228,7 @@ Newest). Diff options (⇆ Side by side, ␣ Ignore spaces, # Line numbers) are 
 | `scripts/release.mjs` | a git tag and GitHub release for the version (deploy runs it when all is committed) |
 | `CHANGELOG.md` | what changed, by version |
 | `samples/make-test-glb.mjs` (run by the helper test; `node samples/make-test-glb.mjs [out.glb]` by hand) | a test model for previews: a yellow star (material color), a red / blue checker plate (an embedded PNG texture) and a green cube |
+| `art/icon.svg` → `.claude-plugin/icon.png` | the plugin's icon (a folder, a page and a pencil), drawn by `art/make-icon.mjs` with sharp from another project (`SHARP=<path to sharp> node art/make-icon.mjs`) |
 | `tsconfig.json` | extends `.claude-plugin/types/tsconfig.json` (written by the engine when it loads the mod) |
 | `deploy.mjs` | checks, then copies the mod into the folder every chat loads (not deployed itself), writes its `deployed.json` stamp (version, time), then tags and releases the version (`--no-release` skips that) |
 
