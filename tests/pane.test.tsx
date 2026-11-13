@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { age, ageTone, blameRuns, branchesFrom, graphRows, lastCommitByFile, logFrom, releasesFrom, wordDiff } from '../hooks/project'
 
 // The Files pane drawn as the desktop app draws it, in a folder like the one where it stayed blank
-// (F:\GT racing IPAD: not a git repository, one links.txt). The engine's answers are this test's hooks.
+// (a made-up folder: not a git repository, one links.txt). The engine's answers are this test's hooks.
 const PANE = {
   plugin: 'file-pane',
   component: 'Pane',
@@ -17,7 +17,7 @@ const PANE = {
   },
 } as const
 
-const CWD = 'F:\\GT racing IPAD'
+const CWD = 'F:\\demo folder'
 const TABS = ['next', 'items', 'ticks', 'timeline', 'checks', 'log', 'search', 'backups', 'notes', 'features', 'blocks']
 // three windows since 2026-11-11: Files (PANE), Git, Project
 const GIT = { ...PANE, requestId: 'file-pane-git', props: { ...PANE.props, title: 'Git' } } as const
@@ -54,7 +54,7 @@ test('every view of the Files pane draws in a non-git folder with one file', asy
   on('session.cwd', () => ({ value: CWD }))
   on('env.get', () => ({ value: 'C:\\Users\\tester' }))
   on('fs.list', (_, e) => ({
-    value: String(e.path ?? '').endsWith('IPAD') ? [
+    value: String(e.path ?? '').endsWith('demo folder') ? [
             { name: 'links.txt', kind: 'file', size: 805, mtimeMs: 1, isLink: false },
             { name: 'notes.md', kind: 'file', size: 60, mtimeMs: 1, isLink: false },
           ] : [],
@@ -64,8 +64,8 @@ test('every view of the Files pane draws in a non-git folder with one file', asy
     value: /\.(txt|md)$/i.test(String(e.path)) ? { kind: 'file', size: 805, mtimeMs: 1, isLink: false } : { kind: 'dir', size: 0, mtimeMs: 1, isLink: false },
   }))
   on('fs.read', (_, e) => {
-    if (/links\.txt$/i.test(String(e.path))) return { value: 'https://archive.org/details/gt-racing\n' }
-    if (/notes\.md$/i.test(String(e.path))) return { value: '# Notes\n\n## To do\n\n- [ ] find the iPad build\n- [x] links saved\n' }
+    if (/links\.txt$/i.test(String(e.path))) return { value: 'links to keep\n' }
+    if (/notes\.md$/i.test(String(e.path))) return { value: '# Notes\n\n## To do\n\n- [ ] write the readme\n- [x] links saved\n' }
     throw new Error('ENOENT')
   })
   on('store.get', () => ({ value: undefined }))
@@ -128,7 +128,7 @@ test('every view of the Files pane draws in a non-git folder with one file', asy
   await ui.press({ key: 'up' })
   await ui.press({ key: 'e:notes.md' })
   await clean('the Markdown document')
-  expect(await ui.find({ type: 'Button', text: /☐ find the iPad build/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /☐ write the readme/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /☑ links saved/ })).toBeDefined()
   await ui.unmount()
 })

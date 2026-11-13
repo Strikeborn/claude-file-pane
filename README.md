@@ -44,6 +44,8 @@ backup times, your per-file notes or your ticked checkboxes.
 **Reads**: the folders and files you open in it (and files Claude reads or edits, when 👁 Follow Claude is on); git's
 answers about the repository; its own store (pinned files, notes, ticks, settings); `LOCALAPPDATA` for where Windows
 keeps program folders. It uses no credentials: it never asks for a password or token, and reads none from the machine.
+The only web address in its code is `http://www.w3.org/2000/svg`, the name every SVG picture declares for its format
+(the pane draws previews and the Git graph as SVG; nothing is fetched from it).
 A file you open is shown as it is, so opening a key file in the pane shows that key on your screen, as an editor would.
 
 **Writes**: only files you save in the pane (a backup copy first, in `~/.claude/file-pane-backups`), a copy of each file
@@ -228,7 +230,7 @@ Newest). Diff options (⇆ Side by side, ␣ Ignore spaces, # Line numbers) are 
 | `scripts/release.mjs` | a git tag and GitHub release for the version (deploy runs it when all is committed) |
 | `CHANGELOG.md` | what changed, by version |
 | `samples/make-test-glb.mjs` (run by the helper test; `node samples/make-test-glb.mjs [out.glb]` by hand) | a test model for previews: a yellow star (material color), a red / blue checker plate (an embedded PNG texture) and a green cube |
-| `art/icon.svg` → `.claude-plugin/icon.png` | the plugin's icon (a folder, a page and a pencil), drawn by `art/make-icon.mjs` with sharp from another project (`SHARP=<path to sharp> node art/make-icon.mjs`) |
+| `art/icon.svg` | the plugin's icon (a folder, a page and a pencil), drawn to the PNG in `.claude-plugin` by `art/make-icon.mjs <out.png>` with sharp from another project (`SHARP=<path to sharp> node art/make-icon.mjs <out.png>`) |
 | `tsconfig.json` | extends `.claude-plugin/types/tsconfig.json` (written by the engine when it loads the mod) |
 | `deploy.mjs` | checks, then copies the mod into the folder every chat loads (not deployed itself), writes its `deployed.json` stamp (version, time), then tags and releases the version (`--no-release` skips that) |
 
